@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: verify BUFFERED direct loads and LIVE live-edge semantics.
 package io.github.ddagunts.screencast.cast
 
 import org.json.JSONObject
@@ -7,6 +8,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CastMessagesTest {
+    @Test fun `buffered direct load preserves exact URL and request correlation`() {
+        val (m, id) = mediaLoadMsg("transport", "session", "https://example/movie.mp4?token=secret", "video/mp4", streamType = "BUFFERED")
+        val json = JSONObject(m.payloadUtf8)
+        assertEquals("transport", m.destinationId)
+        assertEquals(id, json.getInt("requestId"))
+        assertEquals("session", json.getString("sessionId"))
+        assertTrue(json.getBoolean("autoplay"))
+        assertEquals("BUFFERED", json.getJSONObject("media").getString("streamType"))
+        assertEquals("https://example/movie.mp4?token=secret", json.getJSONObject("media").getString("contentId"))
+        assertEquals("video/mp4", json.getJSONObject("media").getString("contentType"))
+    }
+    @Test fun `live load does not seek away from live position`() {
+        assertFalse(JSONObject(mediaLoadMsg("t", "s", "u", "application/x-mpegURL").first.payloadUtf8).has("currentTime"))
+    }
+
 
     @Test fun `connectMsg targets the default receiver on the connection namespace`() {
         val m = connectMsg()

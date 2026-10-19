@@ -1,9 +1,13 @@
-// Fork modification by bearyjd: allow a 30-second receiver launch deadline and add startup diagnostics.
+// Fork modification by bearyjd: validate receiver identity/media acknowledgement, redact secrets and dispose failed direct handoffs.
 package io.github.ddagunts.screencast.cast
 
 import io.github.ddagunts.screencast.util.logE
 import io.github.ddagunts.screencast.util.logI
 import io.github.ddagunts.screencast.util.logW
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,8 +45,7 @@ data class CastVolume(
     val isFixed: Boolean get() = controlType.equals("fixed", ignoreCase = true)
 }
 
-class CastSession(val device: CastDevice) {
-    private val channel = CastChannel(device.host, device.port)
+class CastSession(val device: CastDevice, private val channel: CastTransport = CastChannel(device.host, device.port)) {
     private val _state = MutableStateFlow<CastState>(CastState.Idle)
     val state: StateFlow<CastState> = _state
 
@@ -81,60 +84,69 @@ class CastSession(val device: CastDevice) {
     // gone, so we can't rely on send() to throw.
     @Volatile private var lastHeartbeatMs: Long = 0L
 
-    suspend fun startCast(appId: String, mediaUrl: String, contentType: String, autoplay: Boolean = true) {
+    private var launchRequestId: Int? = null
+    private var loadRequestId: Int? = null
+    private var loadedUrl: String? = null
+    @Volatile private var disposed = false
+
+    suspend fun startCast(appId: String, mediaUrl: String, contentType: String, autoplay: Boolean = true, streamType: String = "LIVE") {
         requestedAppId = appId
+        loadedUrl = mediaUrl
+        disposed = false
         _state.value = CastState.Connecting(device)
         val s = CoroutineScope(Dispatchers.IO)
         scope = s
-        diagnosticStage = "tls_connect"
-        logI("cast stage=$diagnosticStage")
         try {
-            readerJob = channel.connect { e ->
-                logE("cast channel closed: stage=$diagnosticStage exceptionType=${e?.javaClass?.simpleName ?: "none"}")
-                _state.value = CastState.Error(e?.message ?: "disconnected")
+            diagnosticStage = "tls_connect"
+            readerJob = channel.connect {
+                if (!disposed) fail("Receiver disconnected. Reopen the share screen to reconnect.")
             }
-        } catch (e: Throwable) {
-            logE("cast failure: stage=$diagnosticStage exceptionType=${e.javaClass.simpleName}")
-            _state.value = CastState.Error(e.message ?: "connect failed")
-            return
+            currentCoroutineContext().ensureActive()
+            channel.send(connectMsg())
+            lastHeartbeatMs = System.currentTimeMillis()
+            s.launch { heartbeatLoop() }
+            s.launch(start = CoroutineStart.UNDISPATCHED) { handleIncoming() }
+            diagnosticStage = "receiver_status_wait"
+            val (launch, launchId) = launchMsg(appId)
+            launchRequestId = launchId
+            channel.send(launch)
+            if (!waitForReceiverSession({ transportId != null && sessionId != null || disposed })) {
+                fail("Receiver launch timed out.")
+                return
+            }
+            if (disposed) return
+            val tid = transportId ?: return
+            val sid = sessionId ?: return
+            channel.send(connectMsg(tid))
+            val (load, requestId) = mediaLoadMsg(tid, sid, mediaUrl, contentType, autoplay, streamType)
+            loadRequestId = requestId
+            diagnosticStage = "media_status_wait"
+            channel.send(load)
+            logI("LOAD sent requestId=$requestId streamType=$streamType")
+            s.launch {
+                delay(30_000)
+                if (_state.value is CastState.Connecting) fail("Receiver did not confirm playback. Check media URL access and codec support.")
+            }
+        } catch (e: CancellationException) {
+            close()
+            throw e
+        } catch (e: Exception) {
+            logE("cast failure stage=$diagnosticStage exceptionType=${e.javaClass.simpleName}")
+            fail("Could not load media on receiver. Check network, URL access and codec support.")
         }
-        diagnosticStage = "receiver_connect"
-        logI("cast stage=$diagnosticStage")
-        channel.send(connectMsg())
-        lastHeartbeatMs = System.currentTimeMillis()
-        s.launch { heartbeatLoop() }
-        s.launch { handleIncoming() }
+    }
 
-        val (launch, launchReqId) = launchMsg(appId)
-        diagnosticStage = "launch_send"
-        logI("cast stage=$diagnosticStage requestId=$launchReqId")
-        channel.send(launch)
-        logI("LAUNCH sent (requestId=$launchReqId, appId=$appId)")
+    suspend fun stopPlayback() {
+        try {
+            val tid = transportId
+            val mid = mediaSessionId
+            if (tid != null && mid != null) channel.send(mediaStopMsg(tid, mid).first)
+        } finally { close() }
+    }
 
-        // Wait for transportId from RECEIVER_STATUS (set by handleIncoming)
-        diagnosticStage = "receiver_status_wait"
-        waitForReceiverSession(hasSession = { transportId != null && sessionId != null })
-        val tid = transportId ?: run {
-            logE("cast failure: stage=$diagnosticStage error=launch timed out (no transport id) hasTransportId=false hasSessionId=${sessionId != null}")
-            _state.value = CastState.Error("launch timed out (no transport id)")
-            return
-        }
-        val sid = sessionId ?: run {
-            logE("cast failure: stage=$diagnosticStage error=launch timed out (no session id) hasTransportId=true hasSessionId=false")
-            _state.value = CastState.Error("launch timed out (no session id)")
-            return
-        }
-
-        diagnosticStage = "app_connect"
-        logI("cast stage=$diagnosticStage")
-        channel.send(CastMessage(SENDER_ID, tid, CastNs.CONNECTION, """{"type":"CONNECT"}"""))
-        val (load, loadReqId) = mediaLoadMsg(tid, sid, mediaUrl, contentType, autoplay)
-        diagnosticStage = "load_send"
-        logI("cast stage=$diagnosticStage requestId=$loadReqId")
-        channel.send(load)
-        logI("LOAD sent (requestId=$loadReqId, url=$mediaUrl, autoplay=$autoplay)")
-        diagnosticStage = "casting"
-        _state.value = CastState.Casting(device)
+    private fun fail(message: String) {
+        _state.value = CastState.Error(message)
+        close()
     }
 
     fun stop() {
@@ -196,10 +208,13 @@ class CastSession(val device: CastDevice) {
     }
 
     fun close() {
+        if (disposed) return
+        disposed = true
         readerJob?.cancel()
         channel.close()
         scope?.cancel()
-        _state.value = CastState.Idle
+        loadedUrl = null
+        if (_state.value !is CastState.Error) _state.value = CastState.Idle
     }
 
     private suspend fun heartbeatLoop() {
@@ -238,15 +253,17 @@ class CastSession(val device: CastDevice) {
                         it in setOf("CANCELLED", "TIMEOUT", "NOT_FOUND", "SYSTEM_ERROR", "INVALID_PARAMETER")
                     } ?: "other_or_missing"
                     logE("receiver LAUNCH_ERROR: stage=$diagnosticStage requestId=${obj.opt("requestId") as? Number} reason=$reason")
+                    if (msg.sourceId == DEFAULT_RECEIVER_ID && obj.optInt("requestId", -1) == launchRequestId) fail("Receiver could not launch the media app.")
                 }
-                msg.namespace == CastNs.MEDIA && type == "MEDIA_STATUS" -> parseMediaStatus(obj)
+                msg.namespace == CastNs.MEDIA && type == "MEDIA_STATUS" && msg.sourceId == transportId -> parseMediaStatus(obj)
                 msg.namespace == CastNs.MEDIA && type == "LOAD_FAILED" -> {
-                    logE("LOAD_FAILED: $obj")
-                    _state.value = CastState.Error("receiver rejected media")
+                    if (msg.sourceId == transportId && obj.optInt("requestId", -1) == loadRequestId) {
+                        fail("Receiver rejected media. Check URL access and MP4/MP3 codec support.")
+                    }
                 }
-                msg.namespace == CastNs.CONNECTION && type == "CLOSE" -> {
-                    logW("receiver sent CLOSE")
-                    close()
+                msg.namespace == CastNs.CONNECTION && type == "CLOSE" &&
+                    msg.sourceId in setOf(DEFAULT_RECEIVER_ID, transportId) -> {
+                    fail("Receiver disconnected. Playback may continue without controls.")
                 }
             }
         }
@@ -279,7 +296,8 @@ class CastSession(val device: CastDevice) {
         logI("receiver status: stage=$diagnosticStage hasStatus=true hasApplications=${apps != null} applicationCount=${apps?.length() ?: 0} requestId=${obj.opt("requestId") as? Number}")
         if (apps == null) return
         if (apps.length() == 0) return
-        val app = apps.getJSONObject(0)
+        val app = (0 until apps.length()).mapNotNull { apps.optJSONObject(it) }
+            .firstOrNull { it.optString("appId") == requestedAppId } ?: return
         transportId = app.optString("transportId").ifEmpty { null }
         sessionId = app.optString("sessionId").ifEmpty { null }
         logI("receiver app: stage=$diagnosticStage appMatchesRequested=${app.optString("appId") == requestedAppId} hasTransportId=${transportId != null} hasSessionId=${sessionId != null}")
@@ -290,8 +308,17 @@ class CastSession(val device: CastDevice) {
         if (arr.length() == 0) return
         val s = arr.getJSONObject(0)
         val msid = s.optInt("mediaSessionId", -1)
-        if (msid > 0) mediaSessionId = msid
-        val ps = s.optString("playerState")
+        if (msid <= 0) return
+        if (mediaSessionId == null && obj.optInt("requestId", -1) != loadRequestId &&
+            s.optJSONObject("media")?.optString("contentId") != loadedUrl) return
+        if (mediaSessionId != null && mediaSessionId != msid) return
+        mediaSessionId = msid
+        if (s.optString("playerState") == "IDLE" && s.optString("idleReason") in setOf("ERROR", "CANCELLED", "INTERRUPTED")) {
+            fail("Receiver could not play this media. Check URL access and codec support.")
+            return
+        }
+        if (s.optString("playerState") in setOf("PLAYING", "PAUSED", "BUFFERING")) _state.value = CastState.Casting(device)
+        val ps = s.optString("playerState").takeIf { it in setOf("IDLE", "PLAYING", "PAUSED", "BUFFERING", "LOADING") } ?: "UNKNOWN"
         if (ps.isNotEmpty()) _playerState.value = ps
         if (s.has("currentTime")) _currentTime.value = s.optDouble("currentTime", _currentTime.value)
         logI("media status: playerState=$ps mediaSessionId=$msid currentTime=${"%.3f".format(_currentTime.value)}")
