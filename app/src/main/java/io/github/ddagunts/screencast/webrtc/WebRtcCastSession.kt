@@ -1,8 +1,8 @@
+// Fork modification by bearyjd: injectable session resource boundaries.
 package io.github.ddagunts.screencast.webrtc
 
 import android.content.Context
 import android.content.Intent
-import android.net.ConnectivityManager
 import io.github.ddagunts.screencast.cast.CastChannel
 import io.github.ddagunts.screencast.cast.CastDevice
 import io.github.ddagunts.screencast.cast.CastMessage
@@ -17,10 +17,13 @@ import io.github.ddagunts.screencast.cast.pingMsg
 import io.github.ddagunts.screencast.cast.pongMsg
 import io.github.ddagunts.screencast.cast.setMuteMsg
 import io.github.ddagunts.screencast.cast.setVolumeMsg
-import io.github.ddagunts.screencast.util.NetworkUtils
 import io.github.ddagunts.screencast.util.logE
 import io.github.ddagunts.screencast.util.logI
 import io.github.ddagunts.screencast.util.logW
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 import org.webrtc.IceCandidate
 
@@ -49,12 +53,18 @@ sealed class WebRtcState {
     data class Error(val message: String) : WebRtcState()
 }
 
-class WebRtcCastSession(
+class WebRtcCastSession internal constructor(
     private val context: Context,
     val device: CastDevice,
     private val sessionConfig: WebRtcSessionConfig,
+    private val channel: SessionTransport,
+    private val peerFactory: ((IceCandidate) -> Unit) -> SessionPeer,
+    private val dispatcher: CoroutineDispatcher,
 ) {
-    private val channel = CastChannel(device.host, device.port)
+    constructor(context: Context, device: CastDevice, sessionConfig: WebRtcSessionConfig) : this(
+        context, device, sessionConfig, CastSessionTransport(device.host, device.port),
+        { onIce -> WebRtcPeer(context, sessionConfig, onIce) }, Dispatchers.IO,
+    )
     private val _state = MutableStateFlow<WebRtcState>(WebRtcState.Idle)
     val state: StateFlow<WebRtcState> = _state
 
@@ -64,38 +74,63 @@ class WebRtcCastSession(
     private val _volume = MutableStateFlow(CastVolume())
     val volume: StateFlow<CastVolume> = _volume
 
+    private val closed = AtomicBoolean(false)
     private var scope: CoroutineScope? = null
     private var readerJob: Job? = null
     private var transportId: String? = null
     private var sessionId: String? = null
-    private var peer: WebRtcPeer? = null
+    private var peer: SessionPeer? = null
+    private class PeerLease(val peer: SessionPeer) {
+        var operations = 0
+        var releaseRequested = false
+        var disposed = false
+    }
+    private var peerLease: PeerLease? = null
 
     @Volatile private var lastHeartbeatMs: Long = 0L
 
     suspend fun startCast(appId: String, projectionData: Intent, onProjectionStopped: () -> Unit) {
-        if (appId.isBlank()) {
-            _state.value = WebRtcState.Error("custom App ID is not set — open Settings and paste it")
+        try {
+            start(appId, projectionData, onProjectionStopped)
+        } catch (e: CancellationException) {
+            close()
+            throw e
+        } catch (e: Exception) {
+            logE("webrtc start failed", e)
+            fail(e.message ?: "start failed")
+        }
+    }
+
+    private suspend fun start(appId: String, projectionData: Intent, onProjectionStopped: () -> Unit) {
+        if (closed.get()) return
+        if (sessionConfig.audioEnabled) {
+            fail("WebRTC audio is unsupported; use video-only capture")
             return
         }
-        // Pin the process to the real Wi-Fi Network so libwebrtc's UDP sockets
-        // (ICE STUN + RTP) bypass any always-on VPN's default route. Without
-        // this, devices with apps like Rethink/bravedns active see ICE time
-        // out: packets leave via tun0 with source 10.x and the Chromecast
-        // can't route back. networkIgnoreMask in PeerConnectionFactory only
-        // hides VPN candidates from the OFFER; it doesn't control outbound
-        // routing. bindProcessToNetwork is the nuclear option that forces all
-        // sockets created thereafter onto the Wi-Fi Network. Undone in close().
-        bindProcessToWifi()
-        _state.value = WebRtcState.Connecting(device)
-        val s = CoroutineScope(Dispatchers.IO)
-        scope = s
-        try {
-            readerJob = channel.connect { e ->
-                _state.value = WebRtcState.Error(e?.message ?: "disconnected")
+        if (appId.isBlank()) {
+            fail("custom App ID is not set — open Settings and paste it")
+            return
+        }
+        val s = CoroutineScope(dispatcher + SupervisorJob() + CoroutineExceptionHandler { _, e ->
+            fail(e.message ?: "session failed")
+        })
+        val installedScope = synchronized(this) {
+            if (closed.get()) false else {
+                scope = s
+                _state.value = WebRtcState.Connecting(device)
+                true
             }
+        }
+        if (!installedScope) { s.cancel(); return }
+        try {
+            val reader = channel.connect { e -> fail(e?.message ?: "disconnected") }
+            val installedReader = synchronized(this) {
+                if (closed.get()) false else { readerJob = reader; true }
+            }
+            if (!installedReader) { reader.cancel(); return }
         } catch (e: Throwable) {
             logE("webrtc connect failed", e)
-            _state.value = WebRtcState.Error(e.message ?: "connect failed")
+            fail(e.message ?: "connect failed")
             return
         }
         channel.send(connectMsg())
@@ -103,40 +138,50 @@ class WebRtcCastSession(
         s.launch { heartbeatLoop() }
         s.launch { handleIncoming() }
 
-        _state.value = WebRtcState.Launching(device)
+        if (!transition(WebRtcState.Launching(device))) return
         val (launch, reqId) = launchMsg(appId)
         channel.send(launch)
         logI("LAUNCH sent (requestId=$reqId, appId=$appId)")
 
         val ok = withTimeoutOrNull(10_000) {
-            while (transportId == null || sessionId == null) delay(50)
+            while (!closed.get() && (transportId == null || sessionId == null)) delay(50)
             true
         }
+        if (closed.get()) return
         val tid = transportId
         if (ok == null || tid == null) {
-            _state.value = WebRtcState.Error("launch timed out — is the custom receiver App ID correct?")
+            fail("launch timed out — is the custom receiver App ID correct?")
             return
         }
         // Virtual-connection to the receiver app so it'll route our custom
         // namespace messages. Without this, sends to transportId are dropped.
         channel.send(CastMessage(SENDER_ID, tid, CastNs.CONNECTION, """{"type":"CONNECT"}"""))
 
-        _state.value = WebRtcState.Signaling(device)
+        if (!transition(WebRtcState.Signaling(device))) return
 
         // Peer is only built now, after transportId is known — so every ICE
         // candidate the library emits has a valid destination from the start.
-        val p = WebRtcPeer(context, sessionConfig, onIceCandidate = { cand ->
+        val p = peerFactory { cand ->
             scope?.launch {
                 runCatching {
                     channel.send(iceMsg(tid, cand.sdp, cand.sdpMid, cand.sdpMLineIndex))
-                }.onFailure { logW("send ICE: $it") }
+                }.onFailure { fail("send ICE failed: ${it.message}") }
             }
-        })
-        peer = p
-        p.build()
-        p.addScreenSource(projectionData) { onProjectionStopped() }
+        }
+        val lease = PeerLease(p)
+        val installedPeer = synchronized(this) {
+            if (closed.get()) false else { peer = p; peerLease = lease; true }
+        }
+        if (!installedPeer) { disposePeer(p); return }
+        if (!withPeerOperation(lease) { p.build() }) return
+        if (!withPeerOperation(lease) {
+                p.addScreenSource(projectionData) {
+                    if (!closed.get()) { close(); onProjectionStopped() }
+                }
+            }) return
 
         val offerSdp = p.createOffer()
+        if (closed.get()) return
         channel.send(offerMsg(tid, offerSdp))
         logI("OFFER sent (${offerSdp.length} bytes)")
 
@@ -148,15 +193,13 @@ class WebRtcCastSession(
             p.connectionState.collect { cs ->
                 when (cs.name) {
                     "CONNECTED" -> {
-                        if (_state.value is WebRtcState.Signaling) {
-                            _state.value = WebRtcState.Casting(device)
+                        synchronized(this@WebRtcCastSession) {
+                            if (_state.value is WebRtcState.Signaling) transition(WebRtcState.Casting(device))
                         }
                     }
-                    "FAILED" -> _state.value = WebRtcState.Error("WebRTC ICE failed — are both devices on the same LAN?")
+                    "FAILED" -> fail("WebRTC ICE failed — are both devices on the same LAN?")
                     "CLOSED" -> {
-                        if (_state.value !is WebRtcState.Idle && _state.value !is WebRtcState.Error) {
-                            _state.value = WebRtcState.Idle
-                        }
+                        close()
                     }
                     else -> {}
                 }
@@ -165,48 +208,72 @@ class WebRtcCastSession(
     }
 
     fun stop() {
-        val tid = transportId
-        scope?.launch {
-            runCatching {
-                if (tid != null) channel.send(byeMsg(tid))
-                channel.send(closeMsg())
+        // Local consent/capture teardown must never wait for a receiver write.
+        close()
+    }
+
+    fun close() = finish(null)
+
+    private fun fail(message: String) = finish(message)
+
+    @Synchronized
+    private fun transition(next: WebRtcState): Boolean {
+        if (closed.get()) return false
+        _state.value = next
+        return true
+    }
+
+    // Claim synchronous native initialization before invoking JNI without the
+    // monitor. A disconnect can close transport immediately, but peer disposal
+    // waits until the operation has finished installing native resources.
+    private inline fun withPeerOperation(lease: PeerLease, operation: () -> Unit): Boolean {
+        synchronized(this) {
+            if (closed.get() || peerLease !== lease) return false
+            lease.operations++
+        }
+        try {
+            operation()
+            return !closed.get()
+        } finally {
+            val disposal = synchronized(this) {
+                lease.operations--
+                takeReleasedPeer(lease)
             }
-            close()
+            disposePeer(disposal)
         }
     }
 
-    fun close() {
-        runCatching { peer?.close() }
-        peer = null
-        readerJob?.cancel()
-        channel.close()
-        scope?.cancel()
-        // Unpin the process from Wi-Fi — future non-WebRTC work should use
-        // the default routing again (including any VPN the user has on).
-        runCatching { unbindProcessFromNetwork() }
-            .onFailure { logW("close: unbindProcessFromNetwork: $it") }
-        _state.value = WebRtcState.Idle
+    // Called only while holding the session monitor.
+    private fun takeReleasedPeer(lease: PeerLease): SessionPeer? {
+        if (!lease.releaseRequested || lease.operations != 0 || lease.disposed) return null
+        lease.disposed = true
+        return lease.peer
     }
 
-    private fun bindProcessToWifi() {
-        val net = NetworkUtils.getWifiNetwork(context)
-        if (net == null) {
-            logW("bindProcessToWifi: no Wi-Fi Network with NOT_VPN — skipping bind")
-            return
-        }
-        val cm = context.getSystemService(ConnectivityManager::class.java)
-        if (cm == null) {
-            logW("bindProcessToWifi: ConnectivityManager unavailable")
-            return
-        }
-        val ok = cm.bindProcessToNetwork(net)
-        logI("bindProcessToWifi: ok=$ok network=$net")
+    private fun disposePeer(disposal: SessionPeer?) {
+        runCatching { disposal?.close() }.onFailure { logW("close peer: $it") }
     }
 
-    private fun unbindProcessFromNetwork() {
-        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return
-        cm.bindProcessToNetwork(null)
-        logI("unbindProcessFromNetwork")
+    private fun finish(error: String?) {
+        val resources = synchronized(this) {
+            if (!closed.compareAndSet(false, true)) return
+            _state.value = if (error == null) WebRtcState.Idle else WebRtcState.Error(error)
+            val disposal = peerLease?.let {
+                it.releaseRequested = true
+                takeReleasedPeer(it)
+            }
+            Triple(disposal, readerJob, scope).also {
+                peer = null
+                peerLease = null
+                readerJob = null
+                scope = null
+            }
+        }
+        // Native disposal can wait for callbacks; never hold the session monitor here.
+        disposePeer(resources.first)
+        resources.second?.cancel()
+        runCatching { channel.close() }.onFailure { logW("close channel: $it") }
+        resources.third?.cancel()
     }
 
     private suspend fun heartbeatLoop() {
@@ -215,11 +282,10 @@ class WebRtcCastSession(
             val since = System.currentTimeMillis() - lastHeartbeatMs
             if (since > HEARTBEAT_TIMEOUT_MS) {
                 logE("heartbeat: no PONG in ${since}ms, declaring receiver dead")
-                _state.value = WebRtcState.Error("receiver heartbeat timeout")
-                close()
+                fail("receiver heartbeat timeout")
                 return
             }
-            runCatching { channel.send(pingMsg()) }.onFailure { return }
+            runCatching { channel.send(pingMsg()) }.onFailure { fail("receiver heartbeat failed: ${it.message}"); return }
         }
     }
 
@@ -254,7 +320,7 @@ class WebRtcCastSession(
                 runCatching { peer?.setRemoteAnswer(sdp) }
                     .onFailure {
                         logE("setRemoteAnswer failed", it)
-                        _state.value = WebRtcState.Error("remote answer rejected: ${it.message}")
+                        fail("remote answer rejected: ${it.message}")
                     }
                 logI("ANSWER applied (${sdp.length} bytes)")
             }
