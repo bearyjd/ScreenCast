@@ -1,5 +1,6 @@
 // ScreenCast WebRTC — Cast custom receiver that consumes a WebRTC video
 // stream from the Android sender and renders it fullscreen.
+// Fork modification (2026-10-18): isolate sender ownership and negotiations.
 //
 // Namespace must match WEBRTC_NAMESPACE in
 // app/src/main/java/io/github/ddagunts/screencast/webrtc/WebRtcConfig.kt.
@@ -65,29 +66,24 @@ options.customNamespaces = {};
 options.customNamespaces[NAMESPACE] =
   cast.framework.system.MessageType.JSON;
 
-// Track the senderId we're negotiating with so we can reply to ICE and
-// ANSWER with an explicit target. Broadcast would also work (the platform
-// only has one sender in practice) but targeted replies keep the logs
-// sensible if a second sender ever attaches.
-let senderId = null;
+// Object identity is the local negotiation generation. Capture it across
+// awaits: an older OFFER must never operate on a replacement peer.
+let activeSession = null;
 
-// Current RTCPeerConnection — rebuilt on every new OFFER. The previous
-// implementation made this a module-level `const`, which meant once we
-// `pc.close()` on BYE, any subsequent OFFER silently failed (setRemoteDescription
-// throws on a closed peer, handled-but-invisible). Recreate per OFFER so each
-// cast attempt starts fresh.
-let pc = null;
-
-function closeCurrentPeer() {
-  if (!pc) return;
-  try { pc.close(); } catch (_) {}
-  pc = null;
+function closeSession(session) {
+  if (activeSession !== session) return;
+  activeSession = null;
+  if (session.peer) {
+    try { session.peer.close(); } catch (_) {}
+  }
+  video.srcObject = null;
 }
 
-function createPeer() {
+function createPeer(session) {
   // Empty iceServers list: both peers are on the same LAN, so host candidates
   // are enough; no STUN round-trip, no TURN relays.
   const p = new RTCPeerConnection({ iceServers: [] });
+  session.peer = p;
 
   // Both remote tracks (video, audio) land in a single MediaStream wired to
   // the fullscreen <video> element. Two reasons not to split them:
@@ -109,17 +105,21 @@ function createPeer() {
   video.srcObject = remoteStream;
 
   p.ontrack = (evt) => {
+    if (activeSession !== session) return;
     const kind = evt.track && evt.track.kind || '?';
     console.log('ontrack', kind);
     remoteStream.addTrack(evt.track);
     setStatus(`track: ${kind} (tracks: ${remoteStream.getTracks().length})`);
     const vp = video.play();
     if (vp && typeof vp.catch === 'function') {
-      vp.catch(err => setStatus(`video.play failed: ${err && err.name || err}`));
+      vp.catch(err => {
+        if (activeSession === session) setStatus(`video.play failed: ${err && err.name || err}`);
+      });
     }
   };
 
   p.onicecandidate = (evt) => {
+    if (activeSession !== session) return;
     if (!evt.candidate) return;
     const payload = {
       type: 'ICE',
@@ -129,25 +129,30 @@ function createPeer() {
         sdpMLineIndex: evt.candidate.sdpMLineIndex,
       },
     };
-    sendSignal(payload);
+    sendSignal(payload, session.senderId);
   };
 
   p.onconnectionstatechange = () => {
+    if (activeSession !== session) return;
     const s = p.connectionState;
     console.log('pc state', s);
     if (s === 'connected') hideStatus();
-    else if (s === 'failed') setStatus('WebRTC connection failed');
+    else if (s === 'failed') {
+      closeSession(session);
+      setStatus('WebRTC connection failed');
+    }
     else if (s === 'disconnected') setStatus('Sender disconnected');
     else setStatus(`pc state: ${s}`);
   };
   p.oniceconnectionstatechange = () => {
+    if (activeSession !== session) return;
     setStatus(`ice: ${p.iceConnectionState}`);
   };
 
   return p;
 }
 
-function sendSignal(obj) {
+function sendSignal(obj, senderId = null) {
   // With a known senderId we respond directly; before that (e.g. READY on
   // startup) we broadcast — the CAF framework rejects broadcasts to non-
   // senders with a warning but delivers them to every attached sender.
@@ -159,44 +164,63 @@ function sendSignal(obj) {
 }
 
 context.addCustomMessageListener(NAMESPACE, async (evt) => {
-  senderId = evt.senderId || senderId;
   const msg = evt.data;
   if (!msg || typeof msg !== 'object') return;
+  if (typeof evt.senderId !== 'string' || !evt.senderId) return;
+  if (activeSession && evt.senderId !== activeSession.senderId) return;
+  if (msg.type === 'OFFER' && (typeof msg.sdp !== 'string' || !msg.sdp.trim())) return;
+  let session = activeSession;
   try {
     if (msg.type === 'OFFER') {
       // Tear down any previous peer — a closed or half-configured one can't
       // process a new OFFER. This lets the receiver serve back-to-back casts
       // without requiring a page reload.
-      closeCurrentPeer();
-      pc = createPeer();
+      if (session) closeSession(session);
+      session = { senderId: evt.senderId, peer: null, remoteReady: false, candidates: [] };
+      activeSession = session;
+      const pc = createPeer(session);
       setStatus('OFFER received, setting remote…');
       await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+      if (activeSession !== session) return;
+      session.remoteReady = true;
+      for (const candidate of session.candidates) {
+        await pc.addIceCandidate(candidate);
+        if (activeSession !== session) return;
+      }
+      session.candidates = [];
       setStatus('remote set, creating answer…');
       const answer = await pc.createAnswer();
+      if (activeSession !== session) return;
       setStatus('answer created, setting local…');
       await pc.setLocalDescription(answer);
+      if (activeSession !== session) return;
       setStatus('answer set, sending…');
-      sendSignal({ type: 'ANSWER', sdp: answer.sdp });
+      sendSignal({ type: 'ANSWER', sdp: answer.sdp }, session.senderId);
       setStatus('ANSWER sent, awaiting media');
     } else if (msg.type === 'ICE' && msg.candidate) {
       // Trickle candidates — empty candidate string signals end-of-gather
       // from the sender. Safe to pass through addIceCandidate; Chrome ignores
       // an end-of-candidate marker.
-      if (!pc) return;
+      if (!session) return;
       const c = msg.candidate;
       if (c.candidate) {
-        await pc.addIceCandidate({
+        const candidate = {
           candidate: c.candidate,
           sdpMid: c.sdpMid,
           sdpMLineIndex: c.sdpMLineIndex,
-        });
+        };
+        if (!session.remoteReady) session.candidates.push(candidate);
+        else await session.peer.addIceCandidate(candidate);
       }
     } else if (msg.type === 'BYE') {
+      if (!session) return;
       console.log('sender sent BYE');
       setStatus('Sender ended the cast');
-      closeCurrentPeer();
+      closeSession(session);
     }
   } catch (err) {
+    if (activeSession !== session) return;
+    if (msg.type === 'OFFER') closeSession(session);
     // Surface the failure on-screen. The try/catch used to only log to console,
     // which is invisible on the Chromecast without remote DevTools. When
     // setRemoteDescription or createAnswer throws, the TV now tells us which
@@ -206,6 +230,12 @@ context.addCustomMessageListener(NAMESPACE, async (evt) => {
     const message = err && (err.message || String(err));
     setStatus(`signal ${msg.type} failed: ${name}: ${message}`);
   }
+});
+
+context.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, (evt) => {
+  if (!activeSession || evt.senderId !== activeSession.senderId) return;
+  closeSession(activeSession);
+  setStatus('Sender disconnected');
 });
 
 setStatus('calling context.start()…');
