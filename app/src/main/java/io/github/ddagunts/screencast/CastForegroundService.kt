@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: guard audio capture with the RECORD_AUDIO permission.
 package io.github.ddagunts.screencast
 
 import android.app.Notification
@@ -279,7 +280,11 @@ class CastForegroundService : Service() {
             liveEdgeFactor = config.liveEdgeFactor,
         ).also { segmenter = it }
         val aEnc = AudioEncoder().also { audioEncoder = it }
-        aEnc.start(seg, proj)
+        val audioProjection = if (
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) proj else null
+        aEnc.start(seg, audioProjection)
         val enc = VideoEncoder(
             width = size.width,
             height = size.height,

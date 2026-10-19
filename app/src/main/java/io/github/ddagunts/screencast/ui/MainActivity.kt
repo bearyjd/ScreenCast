@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: request audio permission only when declared by the installed variant.
 package io.github.ddagunts.screencast.ui
 
 import android.Manifest
@@ -76,7 +77,10 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.POST_NOTIFICATIONS
         }
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        val declaredPermissions = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
+            .requestedPermissions.orEmpty()
+        if (Manifest.permission.RECORD_AUDIO in declaredPermissions &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.RECORD_AUDIO
         }
