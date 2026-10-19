@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: allow a 30-second receiver launch deadline and add startup diagnostics.
 package io.github.ddagunts.screencast.cast
 
 import io.github.ddagunts.screencast.util.logE
@@ -13,6 +14,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+
+internal suspend fun waitForReceiverSession(
+    hasSession: () -> Boolean,
+    timeoutMillis: Long = 30_000L,
+): Boolean = withTimeoutOrNull(timeoutMillis) {
+    while (!hasSession()) delay(50)
+    true
+} ?: false
 
 sealed class CastState {
     data object Idle : CastState()
@@ -60,6 +69,8 @@ class CastSession(val device: CastDevice) {
     private var transportId: String? = null
     private var sessionId: String? = null
     private var mediaSessionId: Int? = null
+    @Volatile private var diagnosticStage = "idle"
+    private var requestedAppId: String? = null
 
     // Timestamp of the most recent receiver-originated traffic on the
     // heartbeat namespace. Seeded at connect time; updated on every PONG
@@ -71,44 +82,58 @@ class CastSession(val device: CastDevice) {
     @Volatile private var lastHeartbeatMs: Long = 0L
 
     suspend fun startCast(appId: String, mediaUrl: String, contentType: String, autoplay: Boolean = true) {
+        requestedAppId = appId
         _state.value = CastState.Connecting(device)
         val s = CoroutineScope(Dispatchers.IO)
         scope = s
+        diagnosticStage = "tls_connect"
+        logI("cast stage=$diagnosticStage")
         try {
             readerJob = channel.connect { e ->
+                logE("cast channel closed: stage=$diagnosticStage exceptionType=${e?.javaClass?.simpleName ?: "none"}")
                 _state.value = CastState.Error(e?.message ?: "disconnected")
             }
         } catch (e: Throwable) {
-            logE("connect failed", e)
+            logE("cast failure: stage=$diagnosticStage exceptionType=${e.javaClass.simpleName}")
             _state.value = CastState.Error(e.message ?: "connect failed")
             return
         }
+        diagnosticStage = "receiver_connect"
+        logI("cast stage=$diagnosticStage")
         channel.send(connectMsg())
         lastHeartbeatMs = System.currentTimeMillis()
         s.launch { heartbeatLoop() }
         s.launch { handleIncoming() }
 
         val (launch, launchReqId) = launchMsg(appId)
+        diagnosticStage = "launch_send"
+        logI("cast stage=$diagnosticStage requestId=$launchReqId")
         channel.send(launch)
         logI("LAUNCH sent (requestId=$launchReqId, appId=$appId)")
 
         // Wait for transportId from RECEIVER_STATUS (set by handleIncoming)
-        withTimeoutOrNull(5000) {
-            while (transportId == null || sessionId == null) delay(50)
-        }
+        diagnosticStage = "receiver_status_wait"
+        waitForReceiverSession(hasSession = { transportId != null && sessionId != null })
         val tid = transportId ?: run {
+            logE("cast failure: stage=$diagnosticStage error=launch timed out (no transport id) hasTransportId=false hasSessionId=${sessionId != null}")
             _state.value = CastState.Error("launch timed out (no transport id)")
             return
         }
         val sid = sessionId ?: run {
+            logE("cast failure: stage=$diagnosticStage error=launch timed out (no session id) hasTransportId=true hasSessionId=false")
             _state.value = CastState.Error("launch timed out (no session id)")
             return
         }
 
+        diagnosticStage = "app_connect"
+        logI("cast stage=$diagnosticStage")
         channel.send(CastMessage(SENDER_ID, tid, CastNs.CONNECTION, """{"type":"CONNECT"}"""))
         val (load, loadReqId) = mediaLoadMsg(tid, sid, mediaUrl, contentType, autoplay)
+        diagnosticStage = "load_send"
+        logI("cast stage=$diagnosticStage requestId=$loadReqId")
         channel.send(load)
         logI("LOAD sent (requestId=$loadReqId, url=$mediaUrl, autoplay=$autoplay)")
+        diagnosticStage = "casting"
         _state.value = CastState.Casting(device)
     }
 
@@ -207,6 +232,13 @@ class CastSession(val device: CastDevice) {
                     lastHeartbeatMs = System.currentTimeMillis()
                 }
                 msg.namespace == CastNs.RECEIVER && type == "RECEIVER_STATUS" -> parseReceiverStatus(obj)
+                msg.namespace == CastNs.RECEIVER && type == "LAUNCH_ERROR" -> {
+                    // Only known protocol reasons are safe to log; never dump the payload.
+                    val reason = obj.optString("reason").takeIf {
+                        it in setOf("CANCELLED", "TIMEOUT", "NOT_FOUND", "SYSTEM_ERROR", "INVALID_PARAMETER")
+                    } ?: "other_or_missing"
+                    logE("receiver LAUNCH_ERROR: stage=$diagnosticStage requestId=${obj.opt("requestId") as? Number} reason=$reason")
+                }
                 msg.namespace == CastNs.MEDIA && type == "MEDIA_STATUS" -> parseMediaStatus(obj)
                 msg.namespace == CastNs.MEDIA && type == "LOAD_FAILED" -> {
                     logE("LOAD_FAILED: $obj")
@@ -229,7 +261,10 @@ class CastSession(val device: CastDevice) {
     }
 
     private fun parseReceiverStatus(obj: JSONObject) {
-        val status = obj.optJSONObject("status") ?: return
+        val status = obj.optJSONObject("status") ?: run {
+            logI("receiver status: stage=$diagnosticStage hasStatus=false requestId=${obj.opt("requestId") as? Number}")
+            return
+        }
         // Volume is reported at the receiver level independent of any active app,
         // so parse it before bailing on the empty-applications case.
         status.optJSONObject("volume")?.let { v ->
@@ -240,12 +275,14 @@ class CastSession(val device: CastDevice) {
                 controlType = v.optString("controlType").ifEmpty { current.controlType },
             )
         }
-        val apps = status.optJSONArray("applications") ?: return
+        val apps = status.optJSONArray("applications")
+        logI("receiver status: stage=$diagnosticStage hasStatus=true hasApplications=${apps != null} applicationCount=${apps?.length() ?: 0} requestId=${obj.opt("requestId") as? Number}")
+        if (apps == null) return
         if (apps.length() == 0) return
         val app = apps.getJSONObject(0)
         transportId = app.optString("transportId").ifEmpty { null }
         sessionId = app.optString("sessionId").ifEmpty { null }
-        logI("""receiver status: {"transportId":"$transportId","sessionId":"$sessionId"}""")
+        logI("receiver app: stage=$diagnosticStage appMatchesRequested=${app.optString("appId") == requestedAppId} hasTransportId=${transportId != null} hasSessionId=${sessionId != null}")
     }
 
     private fun parseMediaStatus(obj: JSONObject) {
