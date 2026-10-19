@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: enable device selection after terminal failure.
 package io.github.ddagunts.screencast.ui
 
 import androidx.compose.foundation.background
@@ -64,7 +65,7 @@ fun WebRtcCastBody(vm: WebRtcViewModel) {
     val manualHosts by vm.manualHosts.collectAsStateWithLifecycle()
     val session by vm.session.collectAsStateWithLifecycle()
     val appId by vm.appId.collectAsStateWithLifecycle()
-    val casting = session != null
+    val casting = session?.status?.let { it != "ERROR" } == true
     val appIdMissing = appId.isBlank()
 
     Column(

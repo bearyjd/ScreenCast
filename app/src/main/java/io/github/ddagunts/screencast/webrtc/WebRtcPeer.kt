@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: session resource boundary.
 package io.github.ddagunts.screencast.webrtc
 
 import android.content.Context
@@ -38,11 +39,14 @@ import org.webrtc.audio.JavaAudioDeviceModule
 // Threading: libwebrtc callbacks arrive on internal worker threads. We only
 // expose them via StateFlows (connectionState, iceCandidates), so the Kotlin
 // coroutine side is responsible for its own thread discipline.
-class WebRtcPeer(
+internal class WebRtcPeer(
     private val context: Context,
     private val config: WebRtcSessionConfig,
     private val onIceCandidate: (IceCandidate) -> Unit,
-) {
+) : SessionPeer {
+    init { require(!config.audioEnabled) { "WebRTC audio is unsupported" } }
+
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val eglBase: EglBase = EglBase.create()
     private var factory: PeerConnectionFactory? = null
     private var peer: PeerConnection? = null
@@ -56,13 +60,13 @@ class WebRtcPeer(
     private var audioTrack: AudioTrack? = null
 
     private val _connectionState = MutableStateFlow(PeerConnection.PeerConnectionState.NEW)
-    val connectionState: StateFlow<PeerConnection.PeerConnectionState> = _connectionState
+    override val connectionState: StateFlow<PeerConnection.PeerConnectionState> = _connectionState
 
     // Factory init is a process-wide singleton call inside libwebrtc — guard
     // against callers doing it multiple times in a single app lifetime. The
     // static init is cheap after the first call, but the AAR's native code
     // asserts on re-init of certain subsystems on some ABIs.
-    fun build() {
+    override fun build() {
         synchronized(WebRtcPeer::class.java) {
             if (!factoryInitialized) {
                 PeerConnectionFactory.initialize(
@@ -72,24 +76,19 @@ class WebRtcPeer(
                 factoryInitialized = true
             }
         }
-        // Restrict candidate gathering to real Wi-Fi / Ethernet. Without this
-        // libwebrtc also offers VPN-tunnel (10.x), CGN (192.0.0.x), and public
-        // IPv6 candidates — none of which a LAN Chromecast can reach. The ICE
-        // check then fails on the top-priority pair and times out in 15 s
-        // before falling through to the real Wi-Fi candidate (symptom: session
-        // stuck on "Signaling" on the Android side, ICE state FAILED in logs).
+        // Keep system routing, including VPN policy, intact.
         val pcfOptions = PeerConnectionFactory.Options().apply {
-            networkIgnoreMask =
-                PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK or
-                    PeerConnectionFactory.Options.ADAPTER_TYPE_CELLULAR or
-                    PeerConnectionFactory.Options.ADAPTER_TYPE_VPN
+            // Avoid AndroidNetworkMonitor binding individual sockets to an
+            // underlying Network independently of the system default route.
+            disableNetworkMonitor = true
         }
 
         // Build the factory. When audio is enabled we install our custom ADM
         // (JavaAudioDeviceModule + AudioBufferCallback) so MediaProjection PCM
         // can be fed into libwebrtc's audio pipeline — the AudioRecord itself
         // is attached later in addScreenSource() once MediaProjection is
-        // available. When audio is disabled we skip the ADM entirely, no
+        // available. When audio is disabled we add no local audio track; the
+        // library may still create its default ADM. No
         // m=audio section appears in the OFFER, and there's nothing to
         // configure — cheapest way to honor the user's audio toggle.
         val factoryBuilder = PeerConnectionFactory.builder()
@@ -126,11 +125,7 @@ class WebRtcPeer(
             // continualGatheringPolicy defaults to GATHER_ONCE, which is fine
             // for a LAN — no network changes expected mid-cast.
             //
-            // Prefer the Wi-Fi adapter when libwebrtc chooses between available
-            // networks. Complementary to WebRtcCastSession.bindProcessToWifi()
-            // — the bind forces socket-level routing, this preference guides
-            // candidate selection priority.
-            networkPreference = PeerConnection.AdapterType.WIFI
+
         }
 
         peer = factory!!.createPeerConnection(rtcConfig, observer)
@@ -146,7 +141,7 @@ class WebRtcPeer(
     // foreground service that's already started with the mediaProjection FGS
     // type — ScreenCapturerAndroid.initialize() does that internally using
     // the result data we pass through.
-    fun addScreenSource(
+    override fun addScreenSource(
         projectionData: Intent,
         onProjectionStopped: () -> Unit,
     ) {
@@ -243,7 +238,7 @@ class WebRtcPeer(
         }
     }
 
-    suspend fun createOffer(): String {
+    override suspend fun createOffer(): String {
         val pc = peer ?: error("createOffer: build() first")
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
@@ -269,7 +264,7 @@ class WebRtcPeer(
         return offer.description
     }
 
-    suspend fun setRemoteAnswer(sdp: String) {
+    override suspend fun setRemoteAnswer(sdp: String) {
         val pc = peer ?: error("setRemoteAnswer: build() first")
         val done = CompletableDeferred<Unit>()
         pc.setRemoteDescription(object : SimpleSdpObserver() {
@@ -281,12 +276,13 @@ class WebRtcPeer(
         done.await()
     }
 
-    fun addRemoteIceCandidate(candidate: IceCandidate) {
+    override fun addRemoteIceCandidate(candidate: IceCandidate) {
         peer?.addIceCandidate(candidate)
             ?: logW("addRemoteIceCandidate: peer is null (late message?)")
     }
 
-    fun close() {
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
         runCatching { capturer?.stopCapture() }.onFailure { logW("close: stopCapture: $it") }
         runCatching { capturer?.dispose() }.onFailure { logW("close: capturer.dispose: $it") }
         runCatching { videoTrack?.dispose() }.onFailure { logW("close: videoTrack.dispose: $it") }

@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: disable unreviewed WebRTC audio, including legacy preferences.
 package io.github.ddagunts.screencast.webrtc
 
 import android.content.Context
@@ -74,8 +75,8 @@ class WebRtcConfigStore(context: Context) {
         }
 
     var audioEnabled: Boolean
-        get() = prefs.getBoolean(KEY_AUDIO_ENABLED, false)
-        set(value) { prefs.edit().putBoolean(KEY_AUDIO_ENABLED, value).apply() }
+        get() = false // Legacy true values cannot enable the unreviewed audio path.
+        set(@Suppress("UNUSED_PARAMETER") value) { prefs.edit().putBoolean(KEY_AUDIO_ENABLED, false).apply() }
 
     // Snapshot for handoff into a cast session. Each call reads current prefs
     // so the next cast picks up any changes made after the previous one ended.

@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: allow fresh projection consent after terminal errors.
 package io.github.ddagunts.screencast.ui
 
 import android.app.Application
@@ -93,7 +94,7 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
         val ctx = getApplication<Application>()
         val id = _appId.value
         if (id.isBlank()) return
-        if (session.value != null) return
+        if (session.value?.status?.let { it != "ERROR" } == true) return
         val intent = Intent(ctx, WebRtcProjectionRequestActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             putExtra(WebRtcForegroundService.EXTRA_DEVICE_NAME, device.name)

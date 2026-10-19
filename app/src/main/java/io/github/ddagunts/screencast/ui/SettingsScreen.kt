@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: clearly mark WebRTC audio unsupported.
 package io.github.ddagunts.screencast.ui
 
 import androidx.compose.foundation.layout.Arrangement
@@ -49,7 +50,6 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
     val webRtcAppId by webRtcVm.appId.collectAsStateWithLifecycle()
     val webRtcPreset by webRtcVm.videoPreset.collectAsStateWithLifecycle()
     val webRtcBitrate by webRtcVm.maxBitrateMbps.collectAsStateWithLifecycle()
-    val webRtcAudio by webRtcVm.audioEnabled.collectAsStateWithLifecycle()
     val webRtcCasting = webRtcSession != null
     // Stream config is shared across every active session, so we can only
     // edit it when *no* casts are live. A change mid-cast would invalidate
@@ -240,12 +240,13 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
                 )
             }
             Spacer(Modifier.height(8.dp))
+            Text("WebRTC is video-only. Audio stays off until capture without microphone access is reviewed.")
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Audio", modifier = Modifier.weight(1f))
+                Text("Audio (unsupported)", modifier = Modifier.weight(1f))
                 Switch(
-                    checked = webRtcAudio,
-                    onCheckedChange = { webRtcVm.setAudioEnabled(it) },
-                    enabled = !webRtcCasting,
+                    checked = false,
+                    onCheckedChange = null,
+                    enabled = false,
                 )
             }
         }

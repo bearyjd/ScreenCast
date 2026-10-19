@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: service lifecycle boundary for resource tests.
 package io.github.ddagunts.screencast
 
 import android.app.Notification
@@ -18,6 +19,7 @@ import io.github.ddagunts.screencast.util.logI
 import io.github.ddagunts.screencast.util.logW
 import io.github.ddagunts.screencast.webrtc.WebRtcCastSession
 import io.github.ddagunts.screencast.webrtc.WebRtcState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,6 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.dropWhile
 import kotlinx.coroutines.launch
 
 // Separate FGS from the HLS-mode CastForegroundService. Only ever runs one
@@ -33,9 +36,12 @@ import kotlinx.coroutines.launch
 // bother.
 // Second-device casting would require a second PeerConnection + a second
 // MediaProjection, which re-prompts the user and doubles CPU. Out of scope.
-class WebRtcForegroundService : Service() {
+open class WebRtcForegroundService : Service() {
 
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    internal open val workerDispatcher: kotlinx.coroutines.CoroutineDispatcher get() = Dispatchers.Default
+    private val scope by lazy { CoroutineScope(workerDispatcher + SupervisorJob()) }
+    internal open fun createSession(device: CastDevice, config: io.github.ddagunts.screencast.webrtc.WebRtcSessionConfig) =
+        WebRtcCastSession(this, device, config)
     private var session: WebRtcCastSession? = null
     private var sessionJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -110,12 +116,13 @@ class WebRtcForegroundService : Service() {
         // (UI disables the controls while casting); the next startCast
         // picks up any changes.
         val cfg = io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).snapshot()
-        val s = WebRtcCastSession(this, device, cfg)
+        val s = createSession(device, cfg)
         session = s
         sessionJob = scope.launch {
             // Observe state and mirror to the global flow so the UI can see it.
             launch {
-                s.state.collect { st ->
+                s.state.dropWhile { it is WebRtcState.Idle }.collect { st ->
+                    if (session !== s) return@collect
                     val currentVol = _session.value?.volume
                         ?: io.github.ddagunts.screencast.cast.CastVolume()
                     _session.value = when (st) {
@@ -128,10 +135,7 @@ class WebRtcForegroundService : Service() {
                     }
                     refreshNotification()
                     if (st is WebRtcState.Idle || st is WebRtcState.Error) {
-                        // Error state is terminal here — the session can't
-                        // recover (no retry path for launch/ICE failures yet).
-                        // Hold the ERROR in the flow so the UI shows "why" and
-                        // let the user tap Stop to dismiss.
+                        finishTerminalSession(s)
                     }
                 }
             }
@@ -151,11 +155,22 @@ class WebRtcForegroundService : Service() {
                     stopCast()
                 }
             }.onFailure { e ->
+                if (e is CancellationException || session !== s) return@onFailure
                 logE("webrtc: startCast threw", e)
                 _session.value = SessionSnapshot(device, "ERROR", e.message ?: "start failed")
-                refreshNotification()
+                finishTerminalSession(s)
             }
         }
+    }
+
+    private fun finishTerminalSession(finished: WebRtcCastSession) {
+        if (session !== finished) return
+        finished.close()
+        session = null
+        sessionJob?.cancel()
+        sessionJob = null
+        releaseWakeLock()
+        stopSelfIfIdle()
     }
 
     private fun stopCast() {
@@ -169,7 +184,7 @@ class WebRtcForegroundService : Service() {
     }
 
     private fun stopSelfIfIdle() {
-        if (session == null && _session.value == null) {
+        if (session == null) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -231,7 +246,9 @@ class WebRtcForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        val terminalError = _session.value?.takeIf { it.status == "ERROR" }
         stopCast()
+        if (terminalError != null) _session.value = terminalError
         scope.cancel()
         super.onDestroy()
     }
