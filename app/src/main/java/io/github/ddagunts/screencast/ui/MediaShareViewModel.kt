@@ -1,4 +1,4 @@
-// Fork modification by bearyjd: retain direct-media control across rotation without a projection service.
+// Fork modification by bearyjd: retain direct-media control and classify capture receiver ownership without projection.
 package io.github.ddagunts.screencast.ui
 
 import android.app.Application
@@ -36,10 +36,17 @@ class MediaShareViewModel(app: Application) : AndroidViewModel(app) {
             override suspend fun stop() = withContext(Dispatchers.IO) { cast.stopPlayback() }
             override fun close() = cast.close()
         }
-    }, { host -> CastForegroundService.devicesFlow.value.containsKey(host) || WebRtcForegroundService.sessionFlow.value?.device?.host == host })
+    }, { host -> isCaptureHostBusy(host, CastForegroundService.devicesFlow.value, WebRtcForegroundService.sessionFlow.value) })
     fun receiveInitial(intent: Intent) { if (!initialized) { initialized = true; receive(intent) } }
     fun receive(intent: Intent) = controller.preview(MediaShareIntent.parse(intent))
     fun startDiscovery() { if (!scanning) { scanning = true; runCatching { discovery.start() } } }
     fun stopDiscovery() { if (scanning) { scanning = false; discovery.stop() } }
     override fun onCleared() { stopDiscovery(); controller.disconnect(); super.onCleared() }
 }
+
+internal fun isCaptureHostBusy(
+    host: String,
+    hls: Map<String, CastForegroundService.DeviceCast>,
+    webRtc: WebRtcForegroundService.SessionSnapshot?,
+): Boolean = hls[host]?.castState in setOf("CONNECTING", "CASTING") ||
+    (webRtc?.device?.host == host && webRtc.status in setOf("CONNECTING", "LAUNCHING", "SIGNALING", "CASTING"))
