@@ -14,6 +14,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fork addition (2026-10-18): exercise the custom receiver without Android.
+  receiver-tests:
+    name: Receiver tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check receiver syntax
+        run: node --check receiver/receiver.js
+
+      - name: Test receiver signaling isolation
+        run: node --test receiver/receiver.test.cjs
+
   build:
     name: Build & Lint
     runs-on: ubuntu-latest
