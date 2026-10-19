@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Fork modification by bearyjd: register the ScreenCast Quick Settings tile. -->
+<!-- Fork modification by bearyjd: register the Quick Settings tile and separate direct-media share activity. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -36,6 +36,21 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.MediaShareActivity"
+            android:exported="true"
+            android:label="Cast shared media"
+            android:launchMode="singleTask"
+            android:taskAffinity="${applicationId}.mediahandoff">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
 

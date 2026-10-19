@@ -1,3 +1,4 @@
+// Fork modification by bearyjd: support BUFFERED direct media alongside default LIVE capture.
 package io.github.ddagunts.screencast.cast
 
 import org.json.JSONObject
@@ -51,6 +52,7 @@ fun mediaLoadMsg(
     mediaUrl: String,
     contentType: String,
     autoplay: Boolean = true,
+    streamType: String = "LIVE",
 ): Pair<CastMessage, Int> {
     val reqId = nextRequestId()
     val metadata = JSONObject()
@@ -59,14 +61,14 @@ fun mediaLoadMsg(
     val media = JSONObject()
         .put("contentId", mediaUrl)
         .put("contentType", contentType)
-        .put("streamType", "LIVE")
+        .put("streamType", streamType)
         .put("metadata", metadata)
     val payload = JSONObject()
         .put("type", "LOAD")
         .put("requestId", reqId)
         .put("sessionId", sessionId)
         .put("autoplay", autoplay)
-        .put("currentTime", 0)
+        .apply { if (streamType != "LIVE") put("currentTime", 0) }
         .put("media", media)
         .toString()
     return CastMessage(SENDER_ID, transportId, CastNs.MEDIA, payload) to reqId
