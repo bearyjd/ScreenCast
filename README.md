@@ -1,4 +1,26 @@
-# ScreenCast
+# ScreenCast — independent fork
+
+This is an independent fork of [ddagunts/ScreenCast](https://github.com/ddagunts/ScreenCast), based on upstream **0.14.1**, commit [`7e66bbe`](https://github.com/ddagunts/ScreenCast/commit/7e66bbe). Credit for the original app and its inherited features belongs to the upstream authors and contributors. Upstream Git history, license, and credits are retained.
+
+**This is not an official GrapheneOS project and is not affiliated with or endorsed by GrapheneOS.** Development here focuses on compatibility observed while testing on GrapheneOS.
+
+## Fork changes and verification
+
+- Increase the bounded Cast receiver launch wait from 5 seconds to 30 seconds.
+- Omit `RECORD_AUDIO` in the audio-guard debug build to exercise video-only capture.
+- Add a Quick Settings tile that opens ScreenCast's device picker. Starting a cast then uses Android's normal capture picker and consent flow.
+
+Manual testing on GrapheneOS with Android 17 confirmed visible **HLS video**, that **Stop All** stopped capture and closed the streaming server, and that the tile opened the app's device picker. Audio, WebRTC, remote control, multi-receiver behavior, and general device compatibility have not been validated by this fork. Casting lag remains unresolved; the launch timeout change is not a latency fix.
+
+The launch-wait change passed 100 unit tests. The final tile build passed `assembleDebug` and lint (37 warnings and one hint remain). These checks do not establish a security audit or production readiness.
+
+HLS uses plain HTTP: its session token does not make the stream confidential. Use a trusted LAN. The Cast control connection accepts receiver certificates without authenticating the receiver. WebRTC lifecycle and audio behavior need further review. Read [SECURITY.md](SECURITY.md) before use and [FORK.md](FORK.md) for scope and next steps. Fork release identity and signed releases are pending.
+
+## Upstream documentation (inherited)
+
+The following description and screenshots are retained from upstream, with build prerequisites updated for this checkout. Feature, security, compatibility, and latency statements below describe the inherited implementation and upstream expectations; they are **not verification claims by this fork**. In particular, optional audio described below is unavailable in the audio-guard debug build, and the WebRTC and remote-control instructions have not been tested here.
+
+### Original project description
 
 An open-source Android app that casts the phone's screen to one or more Chromecast devices over the local Wi-Fi network, with synchronized playback across all connected receivers. Also doubles as a remote control for Android TV / Google TV devices over the polo + Android TV Remote v2 protocols. Vibe-coded and unchecked.
 
@@ -49,9 +71,9 @@ Switch the segmented control at the top to **Remote** to use the app as a remote
 - Android 8.0+ (API 26).
 - A Chromecast on the same Wi-Fi network.
 
-## Build
+## Build (updated for this fork)
 
-The Gradle wrapper is checked in. You only need a JDK 17 or 21 — Gradle itself is downloaded on first run.
+The Gradle wrapper is checked in. Use JDK 21 and the Android SDK with platform 36 installed; Gradle is downloaded on first run.
 
 ```sh
 export JAVA_HOME=/path/to/jdk-21
@@ -60,7 +82,7 @@ export JAVA_HOME=/path/to/jdk-21
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-Pinned to Gradle 9.4.1; tested against Android Studio's bundled JBR 21.
+Pinned to Gradle 9.6.0; use JDK 21. The project compiles and targets Android SDK 36.
 
 Debug builds install side-by-side with release (`applicationId` suffix `.debug`).
 
