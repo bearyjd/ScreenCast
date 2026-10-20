@@ -14,9 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fork addition (2026-10-18): exercise the custom receiver without Android.
+  # Fork modification (2026-10-19): test and package receiver-only bytes without deployment.
   receiver-tests:
-    name: Receiver tests
+    name: Receiver tests & artifact
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,8 +30,18 @@ jobs:
       - name: Check receiver syntax
         run: node --check receiver/receiver.js
 
-      - name: Test receiver signaling isolation
-        run: node --test receiver/receiver.test.cjs
+      - name: Test receiver signaling isolation and packaging
+        run: node --test receiver/receiver.test.cjs scripts/package-receiver.test.cjs
+
+      - name: Build receiver-only artifact
+        run: node scripts/package-receiver.cjs "$RUNNER_TEMP/receiver-artifact"
+
+      - name: Upload receiver-only artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: receiver-${{ github.sha }}
+          path: ${{ runner.temp }}/receiver-artifact/
+          if-no-files-found: error
 
   build:
     name: Build & Lint

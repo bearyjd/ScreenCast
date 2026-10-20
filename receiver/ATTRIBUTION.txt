@@ -1,0 +1,15 @@
+ScreenCast WebRTC receiver — independent fork
+
+Copyright 2026 Dmitry Dagunts.
+Original project: https://github.com/ddagunts/ScreenCast
+Upstream base: 7e66bbe7ae5cc64c012bbe4987940be67925d137 (0.14.1)
+Fork: https://github.com/bearyjd/ScreenCast
+
+Original receiver by the ScreenCast authors and contributors. Fork modifications
+by bearyjd isolate receiver sessions and prepare this static distribution.
+The original license and source modification notices are retained. Distributed
+under the Apache License, Version 2.0; see LICENSE.
+
+This independent fork is not affiliated with or endorsed by GrapheneOS.
+Google's Cast Application Framework is loaded separately from Google's CDN;
+it is not included in this package and can change independently.
