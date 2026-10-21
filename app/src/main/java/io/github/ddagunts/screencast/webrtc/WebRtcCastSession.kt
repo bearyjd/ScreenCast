@@ -16,6 +16,7 @@ import io.github.ddagunts.screencast.cast.launchMsg
 import io.github.ddagunts.screencast.cast.pingMsg
 import io.github.ddagunts.screencast.cast.pongMsg
 import io.github.ddagunts.screencast.cast.setMuteMsg
+import io.github.ddagunts.screencast.cast.stopAppMsg
 import io.github.ddagunts.screencast.cast.setVolumeMsg
 import io.github.ddagunts.screencast.util.logE
 import io.github.ddagunts.screencast.util.logI
@@ -78,7 +79,7 @@ class WebRtcCastSession internal constructor(
     private var scope: CoroutineScope? = null
     private var readerJob: Job? = null
     @Volatile private var transportId: String? = null
-    private var sessionId: String? = null
+    @Volatile private var sessionId: String? = null
     private var peer: SessionPeer? = null
     private class PeerLease(val peer: SessionPeer) {
         var operations = 0
@@ -208,7 +209,7 @@ class WebRtcCastSession internal constructor(
     }
 
     // Explicit stop: local teardown is immediate; the receiver gets a bounded,
-    // best-effort BYE/CLOSE so it clears its <video> instead of freezing.
+    // best-effort BYE/STOP/CLOSE so it clears its <video> instead of freezing.
     fun stop() = finish(null, farewell = true)
 
     fun close() = finish(null)
@@ -257,7 +258,8 @@ class WebRtcCastSession internal constructor(
         val (resources, farewellTarget) = synchronized(this) {
             if (!closed.compareAndSet(false, true)) return
             _state.value = if (error == null) WebRtcState.Idle else WebRtcState.Error(error)
-            val target = if (farewell && error == null) transportId else null
+            val target = if (farewell && error == null && (transportId != null || sessionId != null))
+                Farewell(transportId, sessionId) else null
             val disposal = peerLease?.let {
                 it.releaseRequested = true
                 takeReleasedPeer(it)
@@ -284,22 +286,31 @@ class WebRtcCastSession internal constructor(
     // Own short-lived scope: the session scope is cancelled by finish(). Joining
     // the send (rather than wrapping it in withTimeout) keeps the deadline
     // effective even if a socket write ignores cancellation.
-    private fun sendFarewell(tid: String) {
+    private class Farewell(val transportId: String?, val sessionId: String?)
+
+    // BYE (app teardown hint), STOP (quit the receiver app so the TV clears the
+    // frame even if its JS ignores BYE), then CLOSE. Ids are never logged.
+    private suspend fun sendFarewellMessages(target: Farewell) {
+        target.transportId?.let { channel.send(byeMsg(it)); logI("farewell: sent BYE") }
+        target.sessionId?.let { channel.send(stopAppMsg(it)); logI("farewell: sent STOP") }
+        channel.send(closeMsg()); logI("farewell: sent CLOSE")
+    }
+
+    private fun sendFarewell(target: Farewell) {
         val scope = CoroutineScope(dispatcher + SupervisorJob())
         try {
             scope.launch {
                 try {
                     val send = launch {
                         try {
-                            channel.send(byeMsg(tid))
-                            channel.send(closeMsg())
+                            sendFarewellMessages(target)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
                             logW("farewell failed: $e")
                         }
                     }
-                    withTimeoutOrNull(FAREWELL_TIMEOUT_MS) { send.join() }
+                    if (withTimeoutOrNull(FAREWELL_TIMEOUT_MS) { send.join() } == null) logI("farewell: timed out")
                     send.cancel()
                 } finally {
                     closeChannel()

@@ -40,6 +40,16 @@ fun launchMsg(appId: String): Pair<CastMessage, Int> {
     return CastMessage(SENDER_ID, DEFAULT_RECEIVER_ID, CastNs.RECEIVER, payload) to reqId
 }
 
+// Quits the receiver app (ends the Chromecast session), clearing the screen.
+fun stopAppMsg(sessionId: String): CastMessage {
+    val payload = JSONObject()
+        .put("type", "STOP")
+        .put("requestId", nextRequestId())
+        .put("sessionId", sessionId)
+        .toString()
+    return CastMessage(SENDER_ID, DEFAULT_RECEIVER_ID, CastNs.RECEIVER, payload)
+}
+
 fun getReceiverStatus(): Pair<CastMessage, Int> {
     val reqId = nextRequestId()
     return CastMessage(SENDER_ID, DEFAULT_RECEIVER_ID, CastNs.RECEIVER,

@@ -12,6 +12,7 @@ import io.github.ddagunts.screencast.cast.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.test.*
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -277,6 +278,7 @@ class WebRtcCastSessionTest {
 
     private fun Transport.farewells() = sent.filter {
         (it.namespace == WEBRTC_NAMESPACE && it.payloadUtf8.contains("\"BYE\"")) ||
+            (it.namespace == CastNs.RECEIVER && it.payloadUtf8.contains("\"STOP\"")) ||
             (it.namespace == CastNs.CONNECTION && it.payloadUtf8.contains("\"CLOSE\""))
     }
 
@@ -296,9 +298,11 @@ class WebRtcCastSessionTest {
         session.stop()
         runCurrent()
         val f = transport.farewells()
-        assertEquals(2, f.size)
+        assertEquals(3, f.size)
         assertEquals(WEBRTC_NAMESPACE, f[0].namespace); assertEquals("transport", f[0].destinationId)
-        assertEquals(CastNs.CONNECTION, f[1].namespace)
+        assertEquals(CastNs.RECEIVER, f[1].namespace)
+        assertEquals("session", JSONObject(f[1].payloadUtf8).getString("sessionId"))
+        assertEquals(CastNs.CONNECTION, f[2].namespace)
         assertEquals(1, transport.closeCount)
         assertEquals(WebRtcState.Idle, session.state.value)
     }
@@ -326,7 +330,7 @@ class WebRtcCastSessionTest {
         transport.sent.clear()
         session.stop(); session.stop(); session.close()
         runCurrent(); advanceTimeBy(600); runCurrent()
-        assertEquals(2, transport.farewells().size)
+        assertEquals(3, transport.farewells().size)
         assertEquals(1, transport.closeCount)
     }
 
@@ -364,7 +368,7 @@ class WebRtcCastSessionTest {
         transport.events.clear()
         session.stop()
         runCurrent()
-        assertEquals(listOf("send", "send", "close"), transport.events)
+        assertEquals(listOf("send", "send", "send", "close"), transport.events)
     }
 
     @Test fun `projection stop callback sends farewell and notifies caller`() = runTest {
@@ -375,7 +379,7 @@ class WebRtcCastSessionTest {
         peer.projectionStopped!!.invoke()
         runCurrent()
         assertEquals(1, notified)
-        assertEquals(2, transport.farewells().size)
+        assertEquals(3, transport.farewells().size)
         assertEquals(1, transport.closeCount)
     }
 
@@ -396,7 +400,7 @@ class WebRtcCastSessionTest {
         transport.sent.clear()
         service.onStartCommand(Intent().setAction(WebRtcForegroundService.ACTION_STOP), 0, 2)
         runCurrent(); advanceTimeBy(600); runCurrent()
-        assertEquals(2, transport.farewells().size)
+        assertEquals(3, transport.farewells().size)
         assertEquals(1, transport.closeCount)
         TestService.transport = null
         controller.destroy()
@@ -437,5 +441,30 @@ class WebRtcCastSessionTest {
         assertEquals(0, transport.closeCount)
         advanceTimeBy(501); runCurrent()
         assertEquals(1, transport.closeCount)
+    }
+
+    @Test fun `farewell skips STOP without sessionId and still sends STOP with only sessionId`() = runTest {
+        for (onlyTransport in listOf(true, false)) {
+            val transport = Transport()
+            val session = WebRtcCastSession(context, CastDevice("TV", "192.0.2.1", 8009), config,
+                transport, { Peer() }, StandardTestDispatcher(testScheduler))
+            val start = launch { session.startCast("receiver", Intent()) {} }
+            runCurrent()
+            val app = if (onlyTransport) """"transportId":"transport"""" else """"sessionId":"session""""
+            transport.incoming.emit(CastMessage("receiver-0", SENDER_ID, CastNs.RECEIVER,
+                """{"type":"RECEIVER_STATUS","status":{"applications":[{$app}]}}"""))
+            runCurrent()
+            transport.sent.clear()
+            session.stop()
+            runCurrent(); advanceTimeBy(600); runCurrent()
+            val f = transport.farewells()
+            if (onlyTransport) {
+                assertEquals(listOf(WEBRTC_NAMESPACE, CastNs.CONNECTION), f.map { it.namespace })
+            } else {
+                assertEquals(listOf(CastNs.RECEIVER, CastNs.CONNECTION), f.map { it.namespace })
+            }
+            assertEquals(1, transport.closeCount)
+            start.join()
+        }
     }
 }
