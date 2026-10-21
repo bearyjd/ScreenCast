@@ -153,4 +153,15 @@ class CastMessagesTest {
         assertTrue(b > a)
         assertTrue(c > b)
     }
+
+    @Test fun `stopAppMsg asks the receiver to quit the session`() {
+        val m = stopAppMsg("session-1")
+        val json = JSONObject(m.payloadUtf8)
+        assertEquals(SENDER_ID, m.sourceId)
+        assertEquals(DEFAULT_RECEIVER_ID, m.destinationId)
+        assertEquals(CastNs.RECEIVER, m.namespace)
+        assertEquals("STOP", json.getString("type"))
+        assertEquals("session-1", json.getString("sessionId"))
+        assertTrue(json.getInt("requestId") > 0)
+    }
 }
