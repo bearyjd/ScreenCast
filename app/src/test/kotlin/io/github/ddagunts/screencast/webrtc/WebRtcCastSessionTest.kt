@@ -30,16 +30,19 @@ class WebRtcCastSessionTest {
         override val incoming = MutableSharedFlow<CastMessage>(extraBufferCapacity = 8)
         var closeCount = 0
         var blockSends = false
+        var blockNonCancellable = false
         var connectFails = false
         var sendFails = false
         var disconnectOnConnect = false
         var disconnectOnSend = 0
         var sends = 0
+        val sent = mutableListOf<CastMessage>()
+        val events = mutableListOf<String>()
         val reader = Job()
         var onClose: ((Throwable?) -> Unit)? = null
         override fun connect(onClose: (Throwable?) -> Unit): Job { this.onClose = onClose; if (connectFails) error("connect failed"); if (disconnectOnConnect) onClose(IllegalStateException("disconnected")); return reader }
-        override suspend fun send(message: CastMessage) { if (++sends == disconnectOnSend) onClose?.invoke(IllegalStateException("disconnected")); if (sendFails) error("send failed"); if (blockSends) awaitCancellation() }
-        override fun close() { closeCount++ }
+        override suspend fun send(message: CastMessage) { sent += message; events += "send"; if (++sends == disconnectOnSend) onClose?.invoke(IllegalStateException("disconnected")); if (sendFails) error("send failed"); if (blockSends) awaitCancellation(); if (blockNonCancellable) withContext(NonCancellable) { awaitCancellation() } }
+        override fun close() { closeCount++; events += "close" }
         suspend fun ready() { incoming.emit(CastMessage("receiver-0", SENDER_ID, CastNs.RECEIVER,
             """{"type":"RECEIVER_STATUS","status":{"applications":[{"transportId":"transport","sessionId":"session"}]}}""")) }
     }
@@ -51,8 +54,9 @@ class WebRtcCastSessionTest {
         var answerFails = false
         var onBuild: () -> Unit = {}
         var screenSources = 0
+        var projectionStopped: (() -> Unit)? = null
         override fun build() { onBuild(); if (buildFails) error("build failed") }
-        override fun addScreenSource(data: Intent, onProjectionStopped: () -> Unit) { screenSources++ }
+        override fun addScreenSource(data: Intent, onProjectionStopped: () -> Unit) { screenSources++; projectionStopped = onProjectionStopped }
         override suspend fun createOffer(): String { if (offerFails) error("offer failed"); return "offer" }
         override suspend fun setRemoteAnswer(sdp: String) { if (answerFails) error("answer failed") }
         override fun addRemoteIceCandidate(candidate: IceCandidate) {}
@@ -153,18 +157,20 @@ class WebRtcCastSessionTest {
         override val workerDispatcher get() = dispatcher
         override fun createSession(device: CastDevice, config: WebRtcSessionConfig): WebRtcCastSession {
             creations++
-            return WebRtcCastSession(this, device, config, Transport().apply { disconnectOnSend = 1 },
+            return WebRtcCastSession(this, device, config, transport ?: Transport().apply { disconnectOnSend = 1 },
                 { Peer() }, dispatcher)
         }
         companion object {
             lateinit var dispatcher: CoroutineDispatcher
             var creations = 0
+            internal var transport: SessionTransport? = null
         }
     }
 
     @Test fun `terminal service failure releases foreground ownership and permits retry`() = runTest {
         TestService.dispatcher = StandardTestDispatcher(testScheduler)
         TestService.creations = 0
+        TestService.transport = null
         val controller = Robolectric.buildService(TestService::class.java).create()
         val service = controller.get()
         val intent = Intent().setAction(WebRtcForegroundService.ACTION_START)
@@ -269,4 +275,167 @@ class WebRtcCastSessionTest {
         }
     }
 
+    private fun Transport.farewells() = sent.filter {
+        (it.namespace == WEBRTC_NAMESPACE && it.payloadUtf8.contains("\"BYE\"")) ||
+            (it.namespace == CastNs.CONNECTION && it.payloadUtf8.contains("\"CLOSE\""))
+    }
+
+    private suspend fun TestScope.casting(transport: Transport, peer: Peer = Peer(), onStopped: () -> Unit = {}): WebRtcCastSession {
+        val session = WebRtcCastSession(context, CastDevice("TV", "192.0.2.1", 8009), config,
+            transport, { peer }, StandardTestDispatcher(testScheduler))
+        val start = launch { session.startCast("receiver", Intent(), onStopped) }
+        runCurrent(); transport.ready(); advanceTimeBy(50); runCurrent()
+        start.join()
+        return session
+    }
+
+    @Test fun `stop sends BYE then CLOSE then closes the transport`() = runTest {
+        val transport = Transport()
+        val session = casting(transport)
+        transport.sent.clear()
+        session.stop()
+        runCurrent()
+        val f = transport.farewells()
+        assertEquals(2, f.size)
+        assertEquals(WEBRTC_NAMESPACE, f[0].namespace); assertEquals("transport", f[0].destinationId)
+        assertEquals(CastNs.CONNECTION, f[1].namespace)
+        assertEquals(1, transport.closeCount)
+        assertEquals(WebRtcState.Idle, session.state.value)
+    }
+
+    @Test fun `hung farewell send does not delay teardown and transport closes within timeout`() = runTest {
+        val transport = Transport()
+        val peer = Peer()
+        val session = casting(transport, peer)
+        transport.blockSends = true
+        session.stop()
+        assertEquals("peer disposed synchronously", 1, peer.closeCount)
+        assertEquals(WebRtcState.Idle, session.state.value)
+        assertTrue("reader cancelled synchronously", transport.reader.isCancelled)
+        runCurrent()
+        assertEquals("transport stays open while farewell pending", 0, transport.closeCount)
+        advanceTimeBy(499); runCurrent()
+        assertEquals(0, transport.closeCount)
+        advanceTimeBy(2); runCurrent()
+        assertEquals("transport must close once the timeout elapses", 1, transport.closeCount)
+    }
+
+    @Test fun `stop twice or stop then close sends farewell once`() = runTest {
+        val transport = Transport()
+        val session = casting(transport)
+        transport.sent.clear()
+        session.stop(); session.stop(); session.close()
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertEquals(2, transport.farewells().size)
+        assertEquals(1, transport.closeCount)
+    }
+
+    @Test fun `no farewell without transportId or after failure or plain close`() = runTest {
+        val early = Transport()
+        val s1 = WebRtcCastSession(context, CastDevice("TV", "192.0.2.1", 8009), config,
+            early, { Peer() }, StandardTestDispatcher(testScheduler))
+        val start = launch { s1.startCast("receiver", Intent()) {} }
+        runCurrent()
+        s1.stop()
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertTrue("no transportId yet", early.farewells().isEmpty())
+        assertEquals(1, early.closeCount)
+        start.join()
+
+        val failed = Transport(); val peer = Peer()
+        val s2 = casting(failed, peer)
+        peer.connectionState.value = PeerConnectionState.FAILED
+        runCurrent()
+        s2.stop()
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertTrue("no farewell after failure", failed.farewells().isEmpty())
+
+        val plain = Transport()
+        val s3 = casting(plain)
+        s3.close()
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertTrue("plain close sends no farewell", plain.farewells().isEmpty())
+        assertEquals(1, plain.closeCount)
+    }
+
+    @Test fun `farewell completes before transport close`() = runTest {
+        val transport = Transport()
+        val session = casting(transport)
+        transport.events.clear()
+        session.stop()
+        runCurrent()
+        assertEquals(listOf("send", "send", "close"), transport.events)
+    }
+
+    @Test fun `projection stop callback sends farewell and notifies caller`() = runTest {
+        val transport = Transport(); val peer = Peer()
+        var notified = 0
+        val session = casting(transport, peer) { notified++ }
+        transport.sent.clear()
+        peer.projectionStopped!!.invoke()
+        runCurrent()
+        assertEquals(1, notified)
+        assertEquals(2, transport.farewells().size)
+        assertEquals(1, transport.closeCount)
+    }
+
+    @Test fun `service stop sends farewell despite job cancellation`() = runTest {
+        TestService.dispatcher = StandardTestDispatcher(testScheduler)
+        val transport = Transport()
+        TestService.transport = transport
+        val controller = Robolectric.buildService(TestService::class.java).create()
+        val service = controller.get()
+        val start = Intent().setAction(WebRtcForegroundService.ACTION_START)
+            .putExtra(WebRtcForegroundService.EXTRA_DEVICE_NAME, "TV")
+            .putExtra(WebRtcForegroundService.EXTRA_DEVICE_HOST, "192.0.2.1")
+            .putExtra(WebRtcForegroundService.EXTRA_APP_ID, "receiver")
+            .putExtra(WebRtcForegroundService.EXTRA_RESULT_DATA, Intent())
+        service.onStartCommand(start, 0, 1)
+        // Stop while startup is still waiting on the launch loop, so job cancellation races stop().
+        runCurrent(); transport.ready(); runCurrent()
+        transport.sent.clear()
+        service.onStartCommand(Intent().setAction(WebRtcForegroundService.ACTION_STOP), 0, 2)
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertEquals(2, transport.farewells().size)
+        assertEquals(1, transport.closeCount)
+        TestService.transport = null
+        controller.destroy()
+    }
+
+    @Test fun `receiver initiated BYE and CLOSE send no farewell back`() = runTest {
+        for (msg in listOf(
+            CastMessage("transport", SENDER_ID, WEBRTC_NAMESPACE, """{"type":"BYE"}"""),
+            CastMessage("transport", SENDER_ID, CastNs.CONNECTION, """{"type":"CLOSE"}"""),
+        )) {
+            val transport = Transport()
+            val session = casting(transport)
+            transport.sent.clear()
+            transport.incoming.emit(msg)
+            runCurrent(); advanceTimeBy(600); runCurrent()
+            assertTrue(transport.farewells().isEmpty())
+            assertEquals(1, transport.closeCount)
+            session.stop(); runCurrent(); advanceTimeBy(600); runCurrent()
+            assertTrue(transport.farewells().isEmpty())
+        }
+    }
+
+    @Test fun `farewell send failure still closes the transport`() = runTest {
+        val transport = Transport()
+        val session = casting(transport)
+        transport.sendFails = true
+        session.stop()
+        runCurrent()
+        assertEquals(1, transport.closeCount)
+    }
+
+    @Test fun `non cancellable blocked send still closes transport at the deadline`() = runTest {
+        val transport = Transport()
+        val session = casting(transport)
+        transport.blockNonCancellable = true
+        session.stop()
+        runCurrent()
+        assertEquals(0, transport.closeCount)
+        advanceTimeBy(501); runCurrent()
+        assertEquals(1, transport.closeCount)
+    }
 }

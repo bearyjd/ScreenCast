@@ -77,7 +77,7 @@ class WebRtcCastSession internal constructor(
     private val closed = AtomicBoolean(false)
     private var scope: CoroutineScope? = null
     private var readerJob: Job? = null
-    private var transportId: String? = null
+    @Volatile private var transportId: String? = null
     private var sessionId: String? = null
     private var peer: SessionPeer? = null
     private class PeerLease(val peer: SessionPeer) {
@@ -176,7 +176,7 @@ class WebRtcCastSession internal constructor(
         if (!withPeerOperation(lease) { p.build() }) return
         if (!withPeerOperation(lease) {
                 p.addScreenSource(projectionData) {
-                    if (!closed.get()) { close(); onProjectionStopped() }
+                    if (!closed.get()) { stop(); onProjectionStopped() }
                 }
             }) return
 
@@ -207,10 +207,9 @@ class WebRtcCastSession internal constructor(
         }
     }
 
-    fun stop() {
-        // Local consent/capture teardown must never wait for a receiver write.
-        close()
-    }
+    // Explicit stop: local teardown is immediate; the receiver gets a bounded,
+    // best-effort BYE/CLOSE so it clears its <video> instead of freezing.
+    fun stop() = finish(null, farewell = true)
 
     fun close() = finish(null)
 
@@ -254,26 +253,65 @@ class WebRtcCastSession internal constructor(
         runCatching { disposal?.close() }.onFailure { logW("close peer: $it") }
     }
 
-    private fun finish(error: String?) {
-        val resources = synchronized(this) {
+    private fun finish(error: String?, farewell: Boolean = false) {
+        val (resources, farewellTarget) = synchronized(this) {
             if (!closed.compareAndSet(false, true)) return
             _state.value = if (error == null) WebRtcState.Idle else WebRtcState.Error(error)
+            val target = if (farewell && error == null) transportId else null
             val disposal = peerLease?.let {
                 it.releaseRequested = true
                 takeReleasedPeer(it)
             }
-            Triple(disposal, readerJob, scope).also {
-                peer = null
-                peerLease = null
-                readerJob = null
-                scope = null
-            }
+            val owned = Triple(disposal, readerJob, scope)
+            peer = null
+            peerLease = null
+            readerJob = null
+            scope = null
+            owned to target
         }
         // Native disposal can wait for callbacks; never hold the session monitor here.
         disposePeer(resources.first)
         resources.second?.cancel()
-        runCatching { channel.close() }.onFailure { logW("close channel: $it") }
+        // The transport must outlive the farewell, but never past the timeout.
+        if (farewellTarget != null) sendFarewell(farewellTarget) else closeChannel()
         resources.third?.cancel()
+    }
+
+    private fun closeChannel() {
+        runCatching { channel.close() }.onFailure { logW("close channel: $it") }
+    }
+
+    // Own short-lived scope: the session scope is cancelled by finish(). Joining
+    // the send (rather than wrapping it in withTimeout) keeps the deadline
+    // effective even if a socket write ignores cancellation.
+    private fun sendFarewell(tid: String) {
+        val scope = CoroutineScope(dispatcher + SupervisorJob())
+        try {
+            scope.launch {
+                try {
+                    val send = launch {
+                        try {
+                            channel.send(byeMsg(tid))
+                            channel.send(closeMsg())
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            logW("farewell failed: $e")
+                        }
+                    }
+                    withTimeoutOrNull(FAREWELL_TIMEOUT_MS) { send.join() }
+                    send.cancel()
+                } finally {
+                    closeChannel()
+                    scope.cancel()
+                }
+            }
+        } catch (e: Throwable) {
+            // Rejected launch: the farewell is best-effort, the transport is not.
+            logW("farewell not scheduled: $e")
+            closeChannel()
+            scope.cancel()
+        }
     }
 
     private suspend fun heartbeatLoop() {
@@ -377,6 +415,7 @@ class WebRtcCastSession internal constructor(
     }
 
     companion object {
+        private const val FAREWELL_TIMEOUT_MS = 500L
         private const val HEARTBEAT_INTERVAL_MS = 5_000L
         private const val HEARTBEAT_TIMEOUT_MS = 15_000L
     }

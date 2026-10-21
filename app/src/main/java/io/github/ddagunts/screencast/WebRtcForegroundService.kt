@@ -174,9 +174,11 @@ open class WebRtcForegroundService : Service() {
     }
 
     private fun stopCast() {
+        // stop() first: it closes the session synchronously, so cancelling the job
+        // afterwards cannot pre-empt the farewell with close().
+        runCatching { session?.stop() }.onFailure { logW("stopCast: $it") }
         sessionJob?.cancel()
         sessionJob = null
-        runCatching { session?.stop() }.onFailure { logW("stopCast: $it") }
         session = null
         _session.value = null
         releaseWakeLock()
