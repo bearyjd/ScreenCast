@@ -11,7 +11,7 @@ This independent fork has not undergone a security audit. Successful build check
 - WebRTC session/service lifecycle now has JVM regression coverage for local Stop, terminal failures, idempotent cleanup, foreground/wake-lock release and retry. Native capture teardown, microphone indicators, receiver compatibility, latency and physical VPN routing remain unverified. Android TV remote control remains unvalidated.
 - WebRTC is video-only in every variant: audio-enabled session configurations are rejected before connection or peer creation; the setting is disabled and legacy audio-enabled preferences read as off. The WebRTC library may create a default audio device module; JVM boundary tests do not prove microphone indicator behavior. A microphone-free audio implementation requires separate review.
 - WebRTC no longer binds the process to Wi-Fi, excludes VPN adapters, forces Wi-Fi priority or enables Android-specific per-network monitoring/binding. VPN/firewall policy can prevent LAN casting; this fork does not override that policy. These source changes are not a physical routing guarantee.
-- The audio-guard debug build omits `RECORD_AUDIO`; video-only testing does not validate audio capture or its privacy behavior in other builds.
+- Debug builds declare `RECORD_AUDIO` (needed for playback capture); the permission is still requested at runtime, and WebRTC mode remains video-only. Physical audio and privacy behavior is only partly validated.
 
 The Quick Settings tile opens ScreenCast's device picker; starting a cast then uses Android's normal capture picker and consent flow. Stop All was manually verified to stop capture and close the HLS server in the tested configuration; broader lifecycle behavior still needs testing.
 
