@@ -6,7 +6,7 @@ This independent fork preserves the history, Apache-2.0 [LICENSE](LICENSE), and 
 ## Changes
 
 - Bound the receiver launch wait at 30 seconds instead of 5 seconds.
-- Remove `RECORD_AUDIO` from the audio-guard debug manifest for video-only testing.
+- Debug builds now declare `RECORD_AUDIO` like release builds, so HLS playback capture can be tested; WebRTC mode remains video-only.
 - Make WebRTC video-only: reject audio-enabled sessions and disable the unreviewed audio setting, including previously enabled preferences.
 - Close WebRTC capture/peer/transport resources on Stop and terminal failures (peer disposal waits for an in-flight synchronous native startup operation to return); release foreground-service and wake-lock ownership while preserving errors and allowing retry.
 - Remove WebRTC process-wide Wi-Fi binding, VPN candidate exclusion and Wi-Fi preference; disable the native Android network monitor that can bind per-network sockets. System routing remains authoritative.
