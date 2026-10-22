@@ -144,6 +144,15 @@ private fun ActiveWebRtcCard(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (snap.status == "CASTING") {
+                        snap.codecMismatch?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
                 WebRtcStatusChip(status = snap.status)
             }

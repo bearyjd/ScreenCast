@@ -127,10 +127,10 @@ open class WebRtcForegroundService : Service() {
                         ?: io.github.ddagunts.screencast.cast.CastVolume()
                     _session.value = when (st) {
                         is WebRtcState.Idle -> null
-                        is WebRtcState.Connecting -> SessionSnapshot(device, "CONNECTING", volume = currentVol)
-                        is WebRtcState.Launching -> SessionSnapshot(device, "LAUNCHING", volume = currentVol)
-                        is WebRtcState.Signaling -> SessionSnapshot(device, "SIGNALING", volume = currentVol)
-                        is WebRtcState.Casting -> SessionSnapshot(device, "CASTING", volume = currentVol)
+                        is WebRtcState.Connecting -> SessionSnapshot(device, "CONNECTING", volume = currentVol, codecMismatch = s.codecMismatch.value)
+                        is WebRtcState.Launching -> SessionSnapshot(device, "LAUNCHING", volume = currentVol, codecMismatch = s.codecMismatch.value)
+                        is WebRtcState.Signaling -> SessionSnapshot(device, "SIGNALING", volume = currentVol, codecMismatch = s.codecMismatch.value)
+                        is WebRtcState.Casting -> SessionSnapshot(device, "CASTING", volume = currentVol, codecMismatch = s.codecMismatch.value)
                         is WebRtcState.Error -> SessionSnapshot(device, "ERROR", st.message, volume = currentVol)
                     }
                     refreshNotification()
@@ -141,6 +141,12 @@ open class WebRtcForegroundService : Service() {
             }
             // Mirror receiver volume onto the snapshot so the UI slider tracks
             // device-side changes (mute button on the TV, Google Home app, etc).
+            launch {
+                s.codecMismatch.collect { m ->
+                    val snap = _session.value ?: return@collect
+                    if (session === s) _session.value = snap.copy(codecMismatch = m)
+                }
+            }
             launch {
                 s.volume.collect { v ->
                     val snap = _session.value ?: return@collect
@@ -271,6 +277,7 @@ open class WebRtcForegroundService : Service() {
         // "CONNECTING" | "LAUNCHING" | "SIGNALING" | "CASTING" | "ERROR"
         val status: String,
         val errorMessage: String? = null,
+        val codecMismatch: String? = null,
         val volume: io.github.ddagunts.screencast.cast.CastVolume =
             io.github.ddagunts.screencast.cast.CastVolume(),
     )

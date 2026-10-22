@@ -33,3 +33,32 @@ fun <T : CodecLike> orderCodecs(codecs: List<T>, pref: VideoCodecPreference): Co
 
 private fun isH264High(codec: CodecLike): Boolean =
     codec.parameters["profile-level-id"]?.startsWith(H264_HIGH_PROFILE_PREFIX, ignoreCase = true) == true
+
+// Short user-facing note when the receiver negotiated a different codec than
+// requested; null for AUTO, a missing/blank/unrecognised mime, or a match.
+fun codecMismatch(requested: VideoCodecPreference, negotiatedMime: String?, applied: Boolean = true): String? {
+    if (requested == VideoCodecPreference.AUTO) return null
+    val negotiated = VideoCodecPreference.entries.firstOrNull {
+        it.mimeType != null && it.mimeType.equals(negotiatedMime?.trim(), ignoreCase = true)
+    } ?: return null
+    if (negotiated == requested) return null
+    if (!applied) return "${requested.label} unavailable on this phone; using ${negotiated.label}"
+    return "Requested ${requested.label} but the TV chose ${negotiated.label}"
+}
+
+// Reports a mismatch at most once per cast, on the first sample that carries a
+// codec mime. `warn` is for logs, `publish` for UI state; neither gets IPs.
+class CodecMismatchReporter(
+    private val requested: VideoCodecPreference,
+    private val warn: (String) -> Unit,
+    private val publish: (String) -> Unit,
+    private val applied: () -> Boolean = { true },
+) {
+    private val decided = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun onSample(sample: VideoStatsSample) {
+        val mime = sample.codecMime?.takeIf { it.isNotBlank() } ?: return
+        if (!decided.compareAndSet(false, true)) return
+        codecMismatch(requested, mime, applied())?.let { warn(it); publish(it) }
+    }
+}

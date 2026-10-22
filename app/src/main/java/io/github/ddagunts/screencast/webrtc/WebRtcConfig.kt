@@ -34,7 +34,8 @@ enum class VideoPreset(val label: String, val width: Int, val height: Int, val f
     }
 }
 
-// Requested video codec. AUTO leaves libwebrtc's default offer order untouched.
+// Requested video codec. AUTO leaves libwebrtc's default offer order untouched;
+// H264 is the default because the library default (software VP8) is far slower.
 enum class VideoCodecPreference(val label: String, val mimeType: String?) {
     AUTO("Auto", null),
     H264("H.264", "video/H264"),
@@ -44,7 +45,7 @@ enum class VideoCodecPreference(val label: String, val mimeType: String?) {
 
     companion object {
         fun fromName(name: String?): VideoCodecPreference =
-            entries.firstOrNull { it.name == name } ?: AUTO
+            entries.firstOrNull { it.name == name } ?: H264
     }
 }
 
@@ -55,7 +56,7 @@ data class WebRtcSessionConfig(
     val videoPreset: VideoPreset,
     val maxBitrateBps: Int,
     val audioEnabled: Boolean,
-    val videoCodecPreference: VideoCodecPreference = VideoCodecPreference.AUTO,
+    val videoCodecPreference: VideoCodecPreference = VideoCodecPreference.H264,
 )
 
 // App ID defaults to the project's published receiver. Users can override with

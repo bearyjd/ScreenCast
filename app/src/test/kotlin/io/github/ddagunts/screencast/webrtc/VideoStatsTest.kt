@@ -176,6 +176,18 @@ class VideoStatsTest {
         assertTrue(job.isCancelled)
     }
 
+    @Test fun `sampler hands each parsed sample to onSample`() = runTest {
+        val seen = mutableListOf<String?>()
+        val sampler = VideoStatsSampler(
+            fetch = { report() }, log = {}, intervalMs = 1_000,
+            onSample = { seen += it.codecMime },
+        )
+        val job = launch { sampler.run() }
+        advanceTimeBy(1_500); runCurrent()
+        assertEquals(2, seen.size)
+        job.cancel()
+    }
+
     @Test fun `sampler stops logging after cancel`() = runTest {
         val lines = mutableListOf<String>()
         val sampler = VideoStatsSampler(fetch = { report() }, log = { lines += it }, intervalMs = 1_000)
