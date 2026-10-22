@@ -36,6 +36,7 @@ fun Any.logE(msg: String, t: Throwable? = null) =
 private val SECRETS = listOf(
     Regex("""("(?:sessionId|transportId)"\s*:\s*")([^"]+)(")""") to """$1***$3""",
     Regex("""(/c/)([A-Za-z0-9_\-]+)(/)""") to """$1***$3""",
+    Regex("""(/m/)([A-Za-z0-9_\-]+)(/)""") to """$1***$3""",
 )
 
 private fun redact(msg: String): String {

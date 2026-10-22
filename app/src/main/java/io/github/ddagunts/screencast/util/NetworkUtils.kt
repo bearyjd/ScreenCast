@@ -7,6 +7,25 @@ import android.net.NetworkCapabilities
 import java.net.Inet4Address
 
 object NetworkUtils {
+    data class WifiLink(val address: String, val prefixLength: Int)
+
+    // Same selection as getWifiIpAddress, plus the interface's prefix length so callers can check that a peer is on
+    // the same subnet (used to refuse serving local files to off-subnet "receivers").
+    fun getWifiLink(context: Context): WifiLink? {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return null
+        for (network in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) continue
+            val link = cm.getLinkProperties(network) ?: continue
+            val v4 = link.linkAddresses.firstOrNull {
+                val a = it.address; a is Inet4Address && !a.isLinkLocalAddress && !a.isLoopbackAddress
+            } ?: continue
+            return WifiLink(v4.address.hostAddress ?: continue, v4.prefixLength)
+        }
+        return null
+    }
+
     // Returns the IPv4 address of a connected Wi-Fi network, or null if none.
     // Filters by TRANSPORT_WIFI via ConnectivityManager rather than interface
     // name (wlan0) because OEMs vary. Chromecast lives on the LAN and our URL

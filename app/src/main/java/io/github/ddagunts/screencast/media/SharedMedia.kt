@@ -5,7 +5,8 @@ import java.net.InetAddress
 import java.net.URI
 import java.util.Locale
 
-data class SharedMedia(val url: String, val contentType: String)
+/** [localName] non-null marks a file served from this phone (url is then empty and unused). */
+data class SharedMedia(val url: String, val contentType: String, val localName: String? = null)
 data class SharedMediaResult(val media: SharedMedia? = null, val error: String? = null)
 
 object SharedMediaParser {
