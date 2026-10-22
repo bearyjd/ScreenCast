@@ -12,6 +12,7 @@ import io.github.ddagunts.screencast.cast.CastDiscovery
 import io.github.ddagunts.screencast.cast.CHROMECAST_DEFAULT_PORT
 import io.github.ddagunts.screencast.util.ManualHostsStore
 import io.github.ddagunts.screencast.webrtc.VideoPreset
+import io.github.ddagunts.screencast.webrtc.VideoCodecPreference
 import io.github.ddagunts.screencast.webrtc.WebRtcConfigStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -66,6 +67,9 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
     private val _maxBitrateMbps = MutableStateFlow(configStore.maxBitrateMbps)
     val maxBitrateMbps: StateFlow<Int> = _maxBitrateMbps
 
+    private val _videoCodecPreference = MutableStateFlow(configStore.videoCodecPreference)
+    val videoCodecPreference: StateFlow<VideoCodecPreference> = _videoCodecPreference
+
     private val _audioEnabled = MutableStateFlow(configStore.audioEnabled)
     val audioEnabled: StateFlow<Boolean> = _audioEnabled
 
@@ -83,6 +87,11 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
     fun setMaxBitrateMbps(mbps: Int) {
         _maxBitrateMbps.value = mbps
         configStore.maxBitrateMbps = mbps
+    }
+
+    fun setVideoCodecPreference(pref: VideoCodecPreference) {
+        _videoCodecPreference.value = pref
+        configStore.videoCodecPreference = pref
     }
 
     fun setAudioEnabled(enabled: Boolean) {

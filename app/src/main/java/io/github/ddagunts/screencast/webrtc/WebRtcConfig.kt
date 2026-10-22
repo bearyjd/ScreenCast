@@ -34,6 +34,20 @@ enum class VideoPreset(val label: String, val width: Int, val height: Int, val f
     }
 }
 
+// Requested video codec. AUTO leaves libwebrtc's default offer order untouched.
+enum class VideoCodecPreference(val label: String, val mimeType: String?) {
+    AUTO("Auto", null),
+    H264("H.264", "video/H264"),
+    VP8("VP8", "video/VP8"),
+    VP9("VP9", "video/VP9"),
+    AV1("AV1", "video/AV1");
+
+    companion object {
+        fun fromName(name: String?): VideoCodecPreference =
+            entries.firstOrNull { it.name == name } ?: AUTO
+    }
+}
+
 // Per-cast snapshot of the user-tunable knobs. Read once at startCast time and
 // held for the session's lifetime — changing store values mid-cast has no
 // effect on the running peer (the UI disables controls while casting).
@@ -41,6 +55,7 @@ data class WebRtcSessionConfig(
     val videoPreset: VideoPreset,
     val maxBitrateBps: Int,
     val audioEnabled: Boolean,
+    val videoCodecPreference: VideoCodecPreference = VideoCodecPreference.AUTO,
 )
 
 // App ID defaults to the project's published receiver. Users can override with
@@ -74,6 +89,10 @@ class WebRtcConfigStore(context: Context) {
             prefs.edit().putInt(KEY_MAX_BITRATE_MBPS, coerced).apply()
         }
 
+    var videoCodecPreference: VideoCodecPreference
+        get() = VideoCodecPreference.fromName(prefs.getString(KEY_VIDEO_CODEC_PREFERENCE, null))
+        set(value) { prefs.edit().putString(KEY_VIDEO_CODEC_PREFERENCE, value.name).apply() }
+
     var audioEnabled: Boolean
         get() = false // Legacy true values cannot enable the unreviewed audio path.
         set(@Suppress("UNUSED_PARAMETER") value) { prefs.edit().putBoolean(KEY_AUDIO_ENABLED, false).apply() }
@@ -84,6 +103,7 @@ class WebRtcConfigStore(context: Context) {
         videoPreset = videoPreset,
         maxBitrateBps = maxBitrateMbps * 1_000_000,
         audioEnabled = audioEnabled,
+        videoCodecPreference = videoCodecPreference,
     )
 
     companion object {
@@ -91,6 +111,7 @@ class WebRtcConfigStore(context: Context) {
         private const val KEY_APP_ID = "app_id"
         private const val KEY_VIDEO_PRESET = "video_preset"
         private const val KEY_MAX_BITRATE_MBPS = "max_bitrate_mbps"
+        private const val KEY_VIDEO_CODEC_PREFERENCE = "video_codec_preference"
         private const val KEY_AUDIO_ENABLED = "audio_enabled"
     }
 }

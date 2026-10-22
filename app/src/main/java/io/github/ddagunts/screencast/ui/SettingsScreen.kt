@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ddagunts.screencast.media.Resolution
 import io.github.ddagunts.screencast.media.StreamConfig
+import io.github.ddagunts.screencast.webrtc.VideoCodecPreference
 import io.github.ddagunts.screencast.webrtc.VideoPreset
 import io.github.ddagunts.screencast.webrtc.WEBRTC_BITRATE_MBPS_OPTIONS
 import kotlin.math.roundToInt
@@ -50,6 +51,7 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
     val webRtcAppId by webRtcVm.appId.collectAsStateWithLifecycle()
     val webRtcPreset by webRtcVm.videoPreset.collectAsStateWithLifecycle()
     val webRtcBitrate by webRtcVm.maxBitrateMbps.collectAsStateWithLifecycle()
+    val webRtcCodec by webRtcVm.videoCodecPreference.collectAsStateWithLifecycle()
     val webRtcCasting = webRtcSession != null
     // Stream config is shared across every active session, so we can only
     // edit it when *no* casts are live. A change mid-cast would invalidate
@@ -239,6 +241,20 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
                     onSelect = { webRtcVm.setMaxBitrateMbps(it) },
                 )
             }
+            Spacer(Modifier.height(8.dp))
+            SettingPickerRow("Video codec") {
+                SettingsDropdown(
+                    label = webRtcCodec.label,
+                    enabled = !webRtcCasting,
+                    options = VideoCodecPreference.entries.map { it.label to it },
+                    onSelect = { webRtcVm.setVideoCodecPreference(it) },
+                )
+            }
+            Text(
+                "Takes effect on next cast; the TV must support the codec",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(8.dp))
             Text("WebRTC is video-only. Audio stays off until capture without microphone access is reviewed.")
             Row(verticalAlignment = Alignment.CenterVertically) {
