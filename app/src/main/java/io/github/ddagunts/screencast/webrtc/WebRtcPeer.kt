@@ -7,7 +7,15 @@ import android.media.projection.MediaProjection
 import io.github.ddagunts.screencast.util.logE
 import io.github.ddagunts.screencast.util.logI
 import io.github.ddagunts.screencast.util.logW
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.webrtc.AudioSource
@@ -22,7 +30,11 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpParameters
+import org.webrtc.MediaStreamTrack
+import org.webrtc.RtpCapabilities
 import org.webrtc.RtpReceiver
+import org.webrtc.RtpTransceiver
+import org.webrtc.RTCStatsReport
 import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -58,6 +70,10 @@ internal class WebRtcPeer(
     private var audioCapture: WebRtcAudioCapture? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
+
+    // Stats sampler: own scope so teardown never depends on the session scope.
+    private val samplerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val statsGuard = StatsCallGuard()
 
     private val _connectionState = MutableStateFlow(PeerConnection.PeerConnectionState.NEW)
     override val connectionState: StateFlow<PeerConnection.PeerConnectionState> = _connectionState
@@ -130,6 +146,7 @@ internal class WebRtcPeer(
 
         peer = factory!!.createPeerConnection(rtcConfig, observer)
             ?: error("PeerConnectionFactory.createPeerConnection returned null")
+        startStatsSampler()
     }
 
     // Attach a screen-source track. Uses libwebrtc's ScreenCapturerAndroid which
@@ -178,6 +195,7 @@ internal class WebRtcPeer(
         // contributor to choppy audio on the TV.
         val sender = pc.addTrack(track, listOf("screen-video"))
         configureVideoSender(sender)
+        applyCodecPreference(pc, f, sender)
 
         if (config.audioEnabled) {
             // Audio track. ScreenCapturerAndroid owns the MediaProjection
@@ -238,6 +256,58 @@ internal class WebRtcPeer(
         }
     }
 
+    // Best effort: any failure leaves libwebrtc's default codec order in place.
+    private fun applyCodecPreference(pc: PeerConnection, f: PeerConnectionFactory, sender: org.webrtc.RtpSender) {
+        val pref = config.videoCodecPreference
+        if (pref == VideoCodecPreference.AUTO) {
+            logI("video codec preference: $pref (applied=true)")
+            return
+        }
+        val applied = try {
+            val transceiver: RtpTransceiver? = pc.transceivers.firstOrNull { it.sender.id() == sender.id() }
+            val caps = f.getRtpSenderCapabilities(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO).codecs
+            val result = orderCodecs(caps.map { CapabilityCodec(it) }, pref)
+            if (transceiver == null || !result.applied) {
+                if (!result.applied) logW("video codec $pref not supported by this device; using default order")
+                false
+            } else {
+                transceiver.setCodecPreferences(result.codecs.map { it.capability })
+                true
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logW("video codec preference failed, using defaults: ${e.javaClass.simpleName}")
+            false
+        }
+        logI("video codec preference: $pref (applied=$applied)")
+    }
+
+    private class CapabilityCodec(val capability: RtpCapabilities.CodecCapability) : CodecLike {
+        override val mimeType: String get() = capability.mimeType
+        override val parameters: Map<String, String> get() = capability.parameters
+    }
+
+    // Runs while CONNECTED; collectLatest cancels the loop on any other state.
+    private fun startStatsSampler() {
+        samplerScope.launch {
+            _connectionState.collectLatest { state ->
+                if (state == PeerConnection.PeerConnectionState.CONNECTED) {
+                    VideoStatsSampler(fetch = ::fetchStats, log = { logI(it) }, warn = { logW(it) }).run()
+                }
+            }
+        }
+    }
+
+    private suspend fun fetchStats(): Map<String, StatEntry>? {
+        val pc = peer?.takeUnless { closed.get() } ?: return null
+        val deferred = CompletableDeferred<RTCStatsReport>()
+        // Only the (fast) initiation is guarded; the report arrives via callback.
+        statsGuard.run { pc.getStats { deferred.complete(it) } } ?: return null
+        val report = withTimeoutOrNull(STATS_TIMEOUT_MS) { deferred.await() } ?: return null
+        return report.statsMap.mapValues { (_, v) -> StatEntry(v.type, v.timestampUs, v.members) }
+    }
+
     override suspend fun createOffer(): String {
         val pc = peer ?: error("createOffer: build() first")
         val constraints = MediaConstraints().apply {
@@ -283,6 +353,11 @@ internal class WebRtcPeer(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        samplerScope.cancel()
+        // Never dispose the native peer while a getStats call is mid-JNI.
+        if (!statsGuard.closeAndAwait(STATS_CLOSE_WAIT_MS)) {
+            logW("close: in-flight stats call did not finish in ${STATS_CLOSE_WAIT_MS} ms; disposing anyway")
+        }
         runCatching { capturer?.stopCapture() }.onFailure { logW("close: stopCapture: $it") }
         runCatching { capturer?.dispose() }.onFailure { logW("close: capturer.dispose: $it") }
         runCatching { videoTrack?.dispose() }.onFailure { logW("close: videoTrack.dispose: $it") }
@@ -348,5 +423,7 @@ internal class WebRtcPeer(
     companion object {
         @Volatile
         private var factoryInitialized = false
+        private const val STATS_TIMEOUT_MS = 2_000L
+        private const val STATS_CLOSE_WAIT_MS = 2_500L
     }
 }
