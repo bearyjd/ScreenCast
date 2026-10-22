@@ -9,6 +9,7 @@ import io.github.ddagunts.screencast.WebRtcForegroundService
 import io.github.ddagunts.screencast.WebRtcProjectionRequestActivity
 import io.github.ddagunts.screencast.cast.CastDevice
 import io.github.ddagunts.screencast.cast.CastDiscovery
+import io.github.ddagunts.screencast.cast.DiscoveryStatus
 import io.github.ddagunts.screencast.cast.CHROMECAST_DEFAULT_PORT
 import io.github.ddagunts.screencast.util.ManualHostsStore
 import io.github.ddagunts.screencast.webrtc.VideoPreset
@@ -26,7 +27,15 @@ import kotlinx.coroutines.flow.stateIn
 // single-peer design.
 class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val discovery = CastDiscovery(app).also { it.start() }
+    private val discovery = CastDiscovery.shared(app)
+
+    // Scan lifecycle is owned by the visible screen (acquire in onStart, release
+    // in onStop); the shared CastDiscovery ref-counts so only one NSD scan runs.
+    private var lease: CastDiscovery.Lease? = null
+    val discoveryStatus: StateFlow<DiscoveryStatus> = discovery.status
+    fun startDiscovery() { if (lease == null) lease = discovery.acquire() }
+    fun stopDiscovery() { lease?.release(); lease = null }
+    fun rescanDiscovery() = discovery.rescan()
 
     // Shared "cast" manual-hosts store with CastViewModel — same underlying
     // Chromecast targets, so a manual add in one mode is visible in the other.
@@ -35,7 +44,7 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
     val manualHosts: StateFlow<Set<String>> = _manualHosts
 
     val discovered: StateFlow<List<CastDevice>> = combine(
-        discovery.flow, _manualHosts,
+        discovery.devices, _manualHosts,
     ) { mdns, manual ->
         val mdnsHosts = mdns.map { it.host }.toSet()
         val manualOnly = manual.filterNot { it in mdnsHosts }
@@ -132,7 +141,7 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        discovery.stop()
+        stopDiscovery()
         super.onCleared()
     }
 }

@@ -61,6 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ddagunts.screencast.CastForegroundService
 import io.github.ddagunts.screencast.CastForegroundService.DeviceCast
 import io.github.ddagunts.screencast.cast.CastDevice
+import io.github.ddagunts.screencast.cast.DiscoveryStatus
 import kotlinx.coroutines.delay
 
 // Coarse matches the default Chromecast step; fine is one percentage point
@@ -73,6 +74,8 @@ private const val VOLUME_STEP_FINE = 0.01
 fun CastControlScreen(vm: CastViewModel) {
     val discovered by vm.discovered.collectAsStateWithLifecycle()
     val manualHosts by vm.manualHosts.collectAsStateWithLifecycle()
+    val discoveryStatus by vm.discoveryStatus.collectAsStateWithLifecycle()
+    DiscoveryLifecycle(vm::startDiscovery, vm::stopDiscovery)
     val activeCasts by vm.activeCasts.collectAsStateWithLifecycle()
     val atCap = activeCasts.size >= CastForegroundService.MAX_DEVICES
     // Per-host Fine toggle. Purely UI state — nothing crosses the wire, the
@@ -111,6 +114,8 @@ fun CastControlScreen(vm: CastViewModel) {
             available = available,
             atCap = atCap,
             manualHosts = manualHosts,
+            discoveryStatus = discoveryStatus,
+            onRescan = { vm.rescanDiscovery() },
             onPick = { vm.startCast(it) },
             onRemoveManual = { vm.removeManualHost(it) },
         )
@@ -334,6 +339,8 @@ private fun AvailableSection(
     available: List<CastDevice>,
     atCap: Boolean,
     manualHosts: Set<String>,
+    discoveryStatus: DiscoveryStatus,
+    onRescan: () -> Unit,
     onPick: (CastDevice) -> Unit,
     onRemoveManual: (String) -> Unit,
 ) {
@@ -347,13 +354,7 @@ private fun AvailableSection(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     if (available.isEmpty()) {
-        var timedOut by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) { delay(30_000); timedOut = true }
-        Text(
-            if (timedOut) "No more devices found. Check Wi-Fi and that the Chromecast is powered on."
-            else "Discovering on LAN…",
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        DiscoveryEmptyState(discoveryStatus, onRescan)
         return
     }
     Card(Modifier.fillMaxWidth()) {
