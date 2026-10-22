@@ -15,11 +15,13 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
 
 class MediaShareViewModel(app: Application) : AndroidViewModel(app) {
-    private val discovery = CastDiscovery(app)
+    private val discovery = CastDiscovery.shared(app)
     private val manual = ManualHostsStore(app, "cast")
     private var initialized = false
-    private var scanning = false
-    val discovered = discovery.flow.map { devices ->
+    private var lease: CastDiscovery.Lease? = null
+    val discoveryStatus: StateFlow<DiscoveryStatus> = discovery.status
+    fun rescanDiscovery() = discovery.rescan()
+    val discovered = discovery.devices.map { devices ->
         val hosts = devices.map { it.host }.toSet()
         (devices + manual.list().filterNot { it in hosts }.map { CastDevice(it, it, CHROMECAST_DEFAULT_PORT) }).sortedBy { it.name }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -39,8 +41,8 @@ class MediaShareViewModel(app: Application) : AndroidViewModel(app) {
     }, { host -> isCaptureHostBusy(host, CastForegroundService.devicesFlow.value, WebRtcForegroundService.sessionFlow.value) })
     fun receiveInitial(intent: Intent) { if (!initialized) { initialized = true; receive(intent) } }
     fun receive(intent: Intent) = controller.preview(MediaShareIntent.parse(intent))
-    fun startDiscovery() { if (!scanning) { scanning = true; runCatching { discovery.start() } } }
-    fun stopDiscovery() { if (scanning) { scanning = false; discovery.stop() } }
+    fun startDiscovery() { if (lease == null) lease = discovery.acquire() }
+    fun stopDiscovery() { lease?.release(); lease = null }
     override fun onCleared() { stopDiscovery(); controller.disconnect(); super.onCleared() }
 }
 

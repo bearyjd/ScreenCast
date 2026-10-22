@@ -16,6 +16,7 @@ import java.net.URI
 fun MediaShareScreen(vm: MediaShareViewModel) {
     val state by vm.controller.state.collectAsStateWithLifecycle()
     val devices by vm.discovered.collectAsStateWithLifecycle()
+    val discoveryStatus by vm.discoveryStatus.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Cast shared media", style = MaterialTheme.typography.headlineSmall)
         Text("The receiver plays a direct MP4 or MP3 URL. Select a receiver, then tap Cast.")
@@ -27,7 +28,7 @@ fun MediaShareScreen(vm: MediaShareViewModel) {
         }
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Text("Receivers", style = MaterialTheme.typography.titleMedium)
-        if (devices.isEmpty()) Text("Searching on your network… Saved receiver addresses also appear here.")
+        if (devices.isEmpty()) DiscoveryEmptyState(discoveryStatus, { vm.rescanDiscovery() }, showConnectByIpHint = false)
         devices.forEach { device ->
             OutlinedButton(onClick = { vm.controller.select(device) }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (state.selected == device) "Selected: ${device.name}" else device.name)

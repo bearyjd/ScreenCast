@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ddagunts.screencast.cast.CastDevice
+import io.github.ddagunts.screencast.cast.DiscoveryStatus
 import kotlinx.coroutines.delay
 
 // Body for the unified main screen when cast mode is WebRTC. Renders the
@@ -63,6 +64,8 @@ import kotlinx.coroutines.delay
 fun WebRtcCastBody(vm: WebRtcViewModel) {
     val discovered by vm.discovered.collectAsStateWithLifecycle()
     val manualHosts by vm.manualHosts.collectAsStateWithLifecycle()
+    val discoveryStatus by vm.discoveryStatus.collectAsStateWithLifecycle()
+    DiscoveryLifecycle(vm::startDiscovery, vm::stopDiscovery)
     val session by vm.session.collectAsStateWithLifecycle()
     val appId by vm.appId.collectAsStateWithLifecycle()
     val casting = session?.status?.let { it != "ERROR" } == true
@@ -96,6 +99,8 @@ fun WebRtcCastBody(vm: WebRtcViewModel) {
             available = available,
             disabled = casting || appIdMissing,
             manualHosts = manualHosts,
+            discoveryStatus = discoveryStatus,
+            onRescan = { vm.rescanDiscovery() },
             onPick = { vm.startCast(it) },
             onRemoveManual = { vm.removeManualHost(it) },
         )
@@ -243,6 +248,8 @@ private fun AvailableWebRtcSection(
     available: List<CastDevice>,
     disabled: Boolean,
     manualHosts: Set<String>,
+    discoveryStatus: DiscoveryStatus,
+    onRescan: () -> Unit,
     onPick: (CastDevice) -> Unit,
     onRemoveManual: (String) -> Unit,
 ) {
@@ -252,13 +259,7 @@ private fun AvailableWebRtcSection(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     if (available.isEmpty()) {
-        var timedOut by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) { delay(30_000); timedOut = true }
-        Text(
-            if (timedOut) "No more devices found. Check Wi-Fi and that the Chromecast is powered on."
-            else "Discovering on LAN…",
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        DiscoveryEmptyState(discoveryStatus, onRescan)
         return
     }
     Card(Modifier.fillMaxWidth()) {

@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ddagunts.screencast.CastMode
+import io.github.ddagunts.screencast.cast.CastDiscovery
 
 class MainActivity : ComponentActivity() {
 
@@ -58,7 +59,7 @@ class MainActivity : ComponentActivity() {
 
     private val permissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* no-op; caller falls back if denied */ }
+    ) { CastDiscovery.shared(this).rescan() } // user may have just allowed local network; no-op without a lease
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.RECORD_AUDIO
         }
+        localNetworkPermissionToRequest()?.let { needed += it }
         if (needed.isNotEmpty()) permissionRequest.launch(needed.toTypedArray())
     }
 }
