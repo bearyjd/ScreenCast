@@ -8,7 +8,7 @@ This is an independent fork of [ddagunts/ScreenCast](https://github.com/ddagunts
 
 - Add Android Share → **Cast shared media** for a single receiver-accessible HTTP(S) MP4 or MP3 URL, with preview, explicit receiver selection and Cast confirmation. No screen capture or encoding is involved. See [HANDOFF.md](HANDOFF.md) for scope, lifecycle and test limits.
 - Increase the bounded Cast receiver launch wait from 5 seconds to 30 seconds.
-- Omit `RECORD_AUDIO` in the audio-guard debug build to exercise video-only capture.
+- Debug builds declare `RECORD_AUDIO` like release builds so HLS playback audio can be tested (WebRTC mode is still video-only).
 - Add a Quick Settings tile that opens ScreenCast's device picker. Starting a cast then uses Android's normal capture picker and consent flow.
 
 Manual testing on GrapheneOS with Android 17 confirmed visible **HLS video**, that **Stop All** stopped capture and closed the streaming server, and that the tile opened the app's device picker. Audio, WebRTC, remote control, multi-receiver behavior, and general device compatibility have not been validated by this fork. Casting lag remains unresolved; the launch timeout change is not a latency fix.
