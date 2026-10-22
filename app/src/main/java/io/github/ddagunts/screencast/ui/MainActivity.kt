@@ -59,7 +59,13 @@ class MainActivity : ComponentActivity() {
 
     private val permissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { CastDiscovery.shared(this).rescan() } // user may have just allowed local network; no-op without a lease
+    ) { results ->
+        // Remember a denial so Settings can offer "Open app settings" after a permanent one.
+        if (results[Manifest.permission.RECORD_AUDIO] == false) {
+            io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).micPermissionAsked = true
+        }
+        CastDiscovery.shared(this).rescan() // user may have just allowed local network; no-op without a lease
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

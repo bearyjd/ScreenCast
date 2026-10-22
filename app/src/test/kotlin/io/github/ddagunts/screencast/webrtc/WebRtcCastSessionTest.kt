@@ -160,17 +160,23 @@ class WebRtcCastSessionTest {
         }
     }
 
-    @Test fun `unsupported audio is rejected before connecting or creating native resources`() = runTest {
-        val transport = Transport()
-        var peerCreated = false
-        val session = WebRtcCastSession(context, CastDevice("TV", "192.0.2.1", 8009), config.copy(audioEnabled = true),
-            transport, { peerCreated = true; Peer() }, StandardTestDispatcher(testScheduler))
-        val start = launch { session.startCast("receiver", Intent()) {} }
-        runCurrent()
-        assertTrue("audio must fail before any network or projection work", session.state.value is WebRtcState.Error)
-        assertFalse(peerCreated)
-        assertNull(transport.onClose)
-        start.join()
+    @Test fun `audio requested is never a reason to refuse the cast`() = runTest {
+        // Audio-active vs video-only is decided inside the peer; the session must still connect.
+        for (granted in listOf(false, true)) {
+            val transport = Transport()
+            var peerCreated = false
+            val cfg = config.copy(audioRequested = true, recordAudioGranted = granted)
+            val session = WebRtcCastSession(context, CastDevice("TV", "192.0.2.1", 8009), cfg,
+                transport, { peerCreated = true; Peer() }, StandardTestDispatcher(testScheduler))
+            val start = launch { session.startCast("receiver", Intent()) {} }
+            runCurrent()
+            assertFalse("granted=$granted must not fail before connecting", session.state.value is WebRtcState.Error)
+            assertNotNull(transport.onClose)
+            transport.ready(); advanceTimeBy(50); runCurrent(); start.join()
+            assertTrue("granted=$granted", peerCreated)
+            assertFalse("granted=$granted", session.state.value is WebRtcState.Error)
+            session.close()
+        }
     }
 
     class TestService : WebRtcForegroundService() {

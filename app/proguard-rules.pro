@@ -49,3 +49,25 @@
 -dontwarn com.google.errorprone.annotations.**
 -dontwarn javax.annotation.**
 -dontwarn javax.annotation.concurrent.**
+
+# WebRTC playback-capture audio (webrtc/WebRtcPlaybackSwap.kt) reaches into
+# libwebrtc's JavaAudioDeviceModule by reflection, by exact member name. The
+# blanket org.webrtc.** rule above already keeps these; the precise rules below
+# document the dependency and survive anyone narrowing the blanket rule. Pinned
+# to io.github.webrtc-sdk:android:125.6422.07; WebRtcLibraryContractTest fails
+# if any of these members change on a library upgrade.
+-keepclassmembers class org.webrtc.audio.JavaAudioDeviceModule {
+    public final org.webrtc.audio.WebRtcAudioRecord audioInput;
+    public void setAudioRecordEnabled(boolean);
+}
+-keepclassmembers class org.webrtc.audio.WebRtcAudioRecord {
+    private volatile android.media.AudioRecord audioRecord;
+    private final java.lang.Object audioRecordStateLock;
+    public boolean initRecordingIfNeeded();
+    public boolean stopRecordingIfNeeded();
+    public void setUseAudioRecord(boolean);
+}
+-keepnames class org.webrtc.audio.WebRtcAudioRecord
+# The safety guard's callbacks are invoked from libwebrtc threads.
+-keepclassmembers class * implements org.webrtc.audio.JavaAudioDeviceModule$AudioRecordStateCallback { *; }
+-keepclassmembers class * implements org.webrtc.audio.JavaAudioDeviceModule$AudioRecordErrorCallback { *; }

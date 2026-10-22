@@ -2,6 +2,11 @@
 package io.github.ddagunts.screencast.webrtc
 
 import android.content.Context
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 
 // WebRTC-mode cast protocol constants. The signaling namespace is ours; it
 // just has to match what the receiver HTML subscribes to via
@@ -55,9 +60,17 @@ enum class VideoCodecPreference(val label: String, val mimeType: String?) {
 data class WebRtcSessionConfig(
     val videoPreset: VideoPreset,
     val maxBitrateBps: Int,
-    val audioEnabled: Boolean,
+    // What the user asked for (pref). Playback-capture audio only; the
+    // microphone is never used.
+    val audioRequested: Boolean,
     val videoCodecPreference: VideoCodecPreference = VideoCodecPreference.H264,
-)
+    // AudioRecord needs RECORD_AUDIO even for playback capture.
+    val recordAudioGranted: Boolean = false,
+    val sdkInt: Int = Build.VERSION.SDK_INT,
+) {
+    // Audio will be attempted. It can still fall back to video-only at runtime.
+    val audioActive: Boolean get() = resolveAudioMode(audioRequested, recordAudioGranted, sdkInt) == AudioMode.ACTIVE
+}
 
 // App ID defaults to the project's published receiver. Users can override with
 // their own registered App ID (cast.google.com) if they host their own receiver.
@@ -70,6 +83,7 @@ val WEBRTC_BITRATE_MBPS_OPTIONS = listOf(1, 2, 4, 6, 8, 12)
 const val DEFAULT_WEBRTC_BITRATE_MBPS = 12
 
 class WebRtcConfigStore(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     var appId: String
@@ -95,16 +109,24 @@ class WebRtcConfigStore(context: Context) {
         set(value) { prefs.edit().putString(KEY_VIDEO_CODEC_PREFERENCE, value.name).apply() }
 
     var audioEnabled: Boolean
-        get() = false // Legacy true values cannot enable the unreviewed audio path.
-        set(@Suppress("UNUSED_PARAMETER") value) { prefs.edit().putBoolean(KEY_AUDIO_ENABLED, false).apply() }
+        get() = prefs.getBoolean(KEY_AUDIO_PLAYBACK_ENABLED, true)
+        set(value) { prefs.edit().putBoolean(KEY_AUDIO_PLAYBACK_ENABLED, value).apply() }
+
+    // True once the system RECORD_AUDIO prompt was answered with a denial; lets the UI tell
+    // "never asked" from "don't ask again".
+    var micPermissionAsked: Boolean
+        get() = prefs.getBoolean(KEY_MIC_PERMISSION_ASKED, false)
+        set(value) = prefs.edit { putBoolean(KEY_MIC_PERMISSION_ASKED, value) }
 
     // Snapshot for handoff into a cast session. Each call reads current prefs
     // so the next cast picks up any changes made after the previous one ended.
     fun snapshot(): WebRtcSessionConfig = WebRtcSessionConfig(
         videoPreset = videoPreset,
         maxBitrateBps = maxBitrateMbps * 1_000_000,
-        audioEnabled = audioEnabled,
+        audioRequested = audioEnabled,
         videoCodecPreference = videoCodecPreference,
+        recordAudioGranted = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED,
     )
 
     companion object {
@@ -113,6 +135,8 @@ class WebRtcConfigStore(context: Context) {
         private const val KEY_VIDEO_PRESET = "video_preset"
         private const val KEY_MAX_BITRATE_MBPS = "max_bitrate_mbps"
         private const val KEY_VIDEO_CODEC_PREFERENCE = "video_codec_preference"
-        private const val KEY_AUDIO_ENABLED = "audio_enabled"
+        // Legacy "audio_enabled" was always written as false by an older build; ignored on purpose.
+        private const val KEY_AUDIO_PLAYBACK_ENABLED = "audio_playback_enabled"
+        private const val KEY_MIC_PERMISSION_ASKED = "mic_permission_asked"
     }
 }

@@ -11,6 +11,8 @@ ktor = "3.5.0"
 # natives for armeabi-v7a, arm64-v8a, x86, x86_64. This is the pragmatic stand-in
 # for "build libwebrtc from Chromium source ourselves" — swap for an in-tree
 # build later without touching any code that references org.webrtc.*.
+# Any bump requires re-running the bytecode review of WebRtcAudioRecord (init/start/stop/
+# AudioRecordThread) behind WebRtcPlaybackSwap.kt, and the WebRtcLibraryContractTest.
 webrtcSdk = "125.6422.07"
 junit = "4.13.2"
 robolectric = "4.14.1"
