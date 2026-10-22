@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- mDNS discovery of Chromecasts. ACCESS_LOCAL_NETWORK is a runtime permission
@@ -90,6 +91,13 @@
         <service
             android:name=".CastForegroundService"
             android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
+        <!-- Keeps the single-file LAN server (media/LocalMediaServer.kt) alive while a shared local
+             video/audio plays on the receiver. Not exported: only our own app can start or stop it. -->
+        <service
+            android:name=".LocalMediaForegroundService"
+            android:foregroundServiceType="mediaPlayback"
             android:exported="false" />
 
         <service

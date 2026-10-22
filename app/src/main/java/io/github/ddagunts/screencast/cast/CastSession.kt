@@ -55,6 +55,15 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
     private val _playerState = MutableStateFlow("IDLE")
     val playerState: StateFlow<String> = _playerState
 
+    // True once the receiver refused or could not start OUR media (LOAD_FAILED, playback error, launch failure before
+    // LOAD). Distinct from a mere control-channel drop, which leaves playback (and any local file server) running.
+    private val _mediaRejected = MutableStateFlow(false)
+    val mediaRejected: StateFlow<Boolean> = _mediaRejected
+
+    // appIds of the applications in the latest RECEIVER_STATUS; null until the first status carrying a list.
+    private val _runningApps = MutableStateFlow<Set<String>?>(null)
+    val runningApps: StateFlow<Set<String>?> = _runningApps
+
     private val _volume = MutableStateFlow(CastVolume())
     val volume: StateFlow<CastVolume> = _volume
 
@@ -111,7 +120,7 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
             launchRequestId = launchId
             channel.send(launch)
             if (!waitForReceiverSession({ transportId != null && sessionId != null || disposed })) {
-                fail("Receiver launch timed out.")
+                failMedia("Receiver launch timed out.")
                 return
             }
             if (disposed) return
@@ -132,7 +141,8 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
             throw e
         } catch (e: Exception) {
             logE("cast failure stage=$diagnosticStage exceptionType=${e.javaClass.simpleName}")
-            fail("Could not load media on receiver. Check network, URL access and codec support.")
+            if (loadRequestId == null) failMedia("Could not load media on receiver. Check network, URL access and codec support.")
+            else fail("Could not load media on receiver. Check network, URL access and codec support.")
         }
     }
 
@@ -142,6 +152,11 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
             val mid = mediaSessionId
             if (tid != null && mid != null) channel.send(mediaStopMsg(tid, mid).first)
         } finally { close() }
+    }
+
+    private fun failMedia(message: String) {
+        _mediaRejected.value = true
+        fail(message)
     }
 
     private fun fail(message: String) {
@@ -253,12 +268,12 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
                         it in setOf("CANCELLED", "TIMEOUT", "NOT_FOUND", "SYSTEM_ERROR", "INVALID_PARAMETER")
                     } ?: "other_or_missing"
                     logE("receiver LAUNCH_ERROR: stage=$diagnosticStage requestId=${obj.opt("requestId") as? Number} reason=$reason")
-                    if (msg.sourceId == DEFAULT_RECEIVER_ID && obj.optInt("requestId", -1) == launchRequestId) fail("Receiver could not launch the media app.")
+                    if (msg.sourceId == DEFAULT_RECEIVER_ID && obj.optInt("requestId", -1) == launchRequestId) failMedia("Receiver could not launch the media app.")
                 }
                 msg.namespace == CastNs.MEDIA && type == "MEDIA_STATUS" && msg.sourceId == transportId -> parseMediaStatus(obj)
                 msg.namespace == CastNs.MEDIA && type == "LOAD_FAILED" -> {
                     if (msg.sourceId == transportId && obj.optInt("requestId", -1) == loadRequestId) {
-                        fail("Receiver rejected media. Check URL access and MP4/MP3 codec support.")
+                        failMedia("Receiver rejected media. Check URL access and MP4/MP3 codec support.")
                     }
                 }
                 msg.namespace == CastNs.CONNECTION && type == "CLOSE" &&
@@ -295,6 +310,7 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
         val apps = status.optJSONArray("applications")
         logI("receiver status: stage=$diagnosticStage hasStatus=true hasApplications=${apps != null} applicationCount=${apps?.length() ?: 0} requestId=${obj.opt("requestId") as? Number}")
         if (apps == null) return
+        _runningApps.value = (0 until apps.length()).mapNotNull { apps.optJSONObject(it)?.optString("appId")?.takeIf(String::isNotEmpty) }.toSet()
         if (apps.length() == 0) return
         val app = (0 until apps.length()).mapNotNull { apps.optJSONObject(it) }
             .firstOrNull { it.optString("appId") == requestedAppId } ?: return
@@ -314,7 +330,7 @@ class CastSession(val device: CastDevice, private val channel: CastTransport = C
         if (mediaSessionId != null && mediaSessionId != msid) return
         mediaSessionId = msid
         if (s.optString("playerState") == "IDLE" && s.optString("idleReason") in setOf("ERROR", "CANCELLED", "INTERRUPTED")) {
-            fail("Receiver could not play this media. Check URL access and codec support.")
+            failMedia("Receiver could not play this media. Check URL access and codec support.")
             return
         }
         if (s.optString("playerState") in setOf("PLAYING", "PAUSED", "BUFFERING")) _state.value = CastState.Casting(device)
