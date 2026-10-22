@@ -56,8 +56,6 @@ internal class WebRtcPeer(
     private val config: WebRtcSessionConfig,
     private val onIceCandidate: (IceCandidate) -> Unit,
 ) : SessionPeer {
-    init { require(!config.audioEnabled) { "WebRTC audio is unsupported" } }
-
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val eglBase: EglBase = EglBase.create()
     private var factory: PeerConnectionFactory? = null
@@ -67,7 +65,8 @@ internal class WebRtcPeer(
     private var capturer: ScreenCapturerAndroid? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var audioModule: JavaAudioDeviceModule? = null
-    private var audioCapture: WebRtcAudioCapture? = null
+    private var audioController: PlaybackAudioController? = null
+    private var audioPort: RealAdmPort? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
 
@@ -124,19 +123,38 @@ internal class WebRtcPeer(
             )
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
 
-        if (config.audioEnabled) {
-            val capture = WebRtcAudioCapture()
-            audioCapture = capture
-            val adm = JavaAudioDeviceModule.builder(context.applicationContext)
-                .setSampleRate(WEBRTC_AUDIO_SAMPLE_RATE)
-                .setUseStereoInput(WEBRTC_AUDIO_CHANNELS == 2)
-                // HW AEC + NS are VoIP mic algorithms that mangle playback
-                // capture (music gets noise-gated, echoes get "cancelled"
-                // against a reference signal that doesn't exist).
-                .setUseHardwareAcousticEchoCanceler(false)
-                .setUseHardwareNoiseSuppressor(false)
-                .setAudioBufferCallback(capture)
-                .createAudioDeviceModule()
+        // The ADM is ALWAYS ours and ALWAYS built with source REMOTE_SUBMIX, even
+        // with audio off, so the default mic-capable (VOICE_COMMUNICATION) ADM is
+        // never created. With audio off its recording is disabled before the
+        // factory exists and no audio track is added. With audio on, the real
+        // playback recorder is installed in addScreenSource().
+        val controller = PlaybackAudioController(log = { logW(it) })
+        audioController = controller
+        val builder = JavaAudioDeviceModule.builder(context.applicationContext)
+            .setAudioSource(AUDIO_SOURCE_REMOTE_SUBMIX)
+            .setSampleRate(WEBRTC_AUDIO_SAMPLE_RATE)
+            .setUseStereoInput(WEBRTC_AUDIO_CHANNELS == 2)
+            // HW AEC + NS are VoIP mic algorithms that mangle playback
+            // capture (music gets noise-gated, echoes get "cancelled"
+            // against a reference signal that doesn't exist).
+            .setUseHardwareAcousticEchoCanceler(false)
+            .setUseHardwareNoiseSuppressor(false)
+            .setAudioRecordStateCallback(controller.stateCallback)
+            .setAudioRecordErrorCallback(controller.errorCallback)
+        if (config.audioActive) {
+            builder.setAudioBufferCallback(WebRtcAudioMeter(
+                recordingState = { controller.record?.let { if (it.isRecording) 3 else 1 } ?: -1 },
+                enabled = controller::meterEnabled,
+            ))
+        }
+        run {
+            val adm = builder.createAudioDeviceModule()
+            val port = try { RealAdmPort(adm) } catch (t: Throwable) {
+                logW("webrtc audio: ADM reflection failed — video only: $t"); null
+            }
+            audioPort = port
+            controller.bind(port, fallbackDisable = { runCatching { adm.setAudioRecordEnabled(false) } })
+            controller.prepare(config.audioActive)
             audioModule = adm
             factoryBuilder.setAudioDeviceModule(adm)
         }
@@ -207,18 +225,15 @@ internal class WebRtcPeer(
         configureVideoSender(sender)
         applyCodecPreference(pc, f, sender)
 
-        if (config.audioEnabled) {
+        if (config.audioActive) {
             // Audio track. ScreenCapturerAndroid owns the MediaProjection
             // instance (obtained lazily inside startCapture); share it with
             // AudioPlaybackCapture so we don't need a second consent prompt.
-            // If the projection isn't exposed yet (older AAR), the audio
-            // callback streams silence — the track still exists, just empty.
+            // Any failure leaves the cast video-only with no audio track.
+            val controller = audioController ?: return
             val projection = cap.mediaProjection
-            if (projection != null) {
-                audioCapture?.attachProjection(projection)
-            } else {
-                logW("ScreenCapturerAndroid.getMediaProjection returned null — audio will be silent")
-            }
+            audioPort?.projection = projection
+            if (!controller.attach(projection != null)) return
             // Audio constraints: disable libwebrtc's audio-processing chain for
             // our non-voice source. googEchoCancellation / googAutoGainControl
             // / googNoiseSuppression / googHighpassFilter are VoIP-microphone
@@ -362,6 +377,8 @@ internal class WebRtcPeer(
             ?: logW("addRemoteIceCandidate: peer is null (late message?)")
     }
 
+    private fun onMainThread() = android.os.Looper.getMainLooper().thread === Thread.currentThread()
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         samplerScope.cancel()
@@ -369,6 +386,10 @@ internal class WebRtcPeer(
         if (!statsGuard.closeAndAwait(STATS_CLOSE_WAIT_MS)) {
             logW("close: in-flight stats call did not finish in ${STATS_CLOSE_WAIT_MS} ms; disposing anyway")
         }
+        // Disable ADM recording and wait (bounded) for the capture record to
+        // stop before the projection goes away; otherwise it logs read errors.
+        runCatching { audioController?.close(if (onMainThread()) 60 else 300) }
+            .onFailure { logW("close: audio quiesce: $it") }
         runCatching { capturer?.stopCapture() }.onFailure { logW("close: stopCapture: $it") }
         runCatching { capturer?.dispose() }.onFailure { logW("close: capturer.dispose: $it") }
         runCatching { videoTrack?.dispose() }.onFailure { logW("close: videoTrack.dispose: $it") }
@@ -376,19 +397,16 @@ internal class WebRtcPeer(
         runCatching { surfaceTextureHelper?.dispose() }.onFailure { logW("close: helper.dispose: $it") }
         runCatching { audioTrack?.dispose() }.onFailure { logW("close: audioTrack.dispose: $it") }
         runCatching { audioSource?.dispose() }.onFailure { logW("close: audioSource.dispose: $it") }
-        // audioCapture.release() stops the AudioRecord. Order matters: stop
-        // the AudioRecord before disposing audioModule, otherwise its
-        // callback thread can still be mid-read when the module goes away.
-        runCatching { audioCapture?.release() }.onFailure { logW("close: audioCapture.release: $it") }
         runCatching { audioModule?.release() }.onFailure { logW("close: audioModule.release: $it") }
         runCatching { peer?.close() }.onFailure { logW("close: peer.close: $it") }
         runCatching { peer?.dispose() }.onFailure { logW("close: peer.dispose: $it") }
         runCatching { factory?.dispose() }.onFailure { logW("close: factory.dispose: $it") }
+        runCatching { audioController?.releaseRecord() }.onFailure { logW("close: releaseRecord: $it") }
         runCatching { eglBase.release() }.onFailure { logW("close: eglBase.release: $it") }
         capturer = null; videoTrack = null; videoSource = null
         surfaceTextureHelper = null; peer = null; factory = null
         audioTrack = null; audioSource = null
-        audioCapture = null; audioModule = null
+        audioModule = null; audioController = null; audioPort = null
     }
 
     private val observer = object : PeerConnection.Observer {

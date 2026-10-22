@@ -107,10 +107,6 @@ class WebRtcCastSession internal constructor(
 
     private suspend fun start(appId: String, projectionData: Intent, onProjectionStopped: () -> Unit) {
         if (closed.get()) return
-        if (sessionConfig.audioEnabled) {
-            fail("WebRTC audio is unsupported; use video-only capture")
-            return
-        }
         if (appId.isBlank()) {
             fail("custom App ID is not set — open Settings and paste it")
             return

@@ -8,14 +8,14 @@ This is an independent fork of [ddagunts/ScreenCast](https://github.com/ddagunts
 
 - Add Android Share → **Cast shared media** for a single receiver-accessible HTTP(S) MP4 or MP3 URL, with preview, explicit receiver selection and Cast confirmation. No screen capture or encoding is involved. See [HANDOFF.md](HANDOFF.md) for scope, lifecycle and test limits.
 - Increase the bounded Cast receiver launch wait from 5 seconds to 30 seconds.
-- Debug builds declare `RECORD_AUDIO` like release builds so HLS playback audio can be tested (WebRTC mode is still video-only).
+- Debug builds declare `RECORD_AUDIO` like release builds so HLS playback audio can be tested (WebRTC mode sends playback-capture audio only, never the microphone).
 - Add a Quick Settings tile that opens ScreenCast's device picker. Starting a cast then uses Android's normal capture picker and consent flow.
 
-Manual testing on GrapheneOS with Android 17 confirmed visible **HLS video**, that **Stop All** stopped capture and closed the streaming server, and that the tile opened the app's device picker. Audio, WebRTC, remote control, multi-receiver behavior, and general device compatibility have not been validated by this fork. Casting lag remains unresolved; the launch timeout change is not a latency fix.
+Manual testing on GrapheneOS with Android 17 confirmed visible **HLS video**, that **Stop All** stopped capture and closed the streaming server, and that the tile opened the app's device picker. WebRTC audio was device-verified once on one phone and TV (audio capture without the microphone; picture and sound arrived once; sync/latency and background or locked-phone behavior unverified); other WebRTC behavior, remote control, multi-receiver behavior, and general device compatibility have not been validated by this fork. Casting lag remains unresolved; the launch timeout change is not a latency fix.
 
 The launch-wait change passed 100 unit tests. The final tile build passed `assembleDebug` and lint (37 warnings and one hint remain). These checks do not establish a security audit or production readiness.
 
-HLS uses plain HTTP: its session token does not make the stream confidential. Use a trusted LAN. The Cast control connection accepts receiver certificates without authenticating the receiver. WebRTC lifecycle and audio behavior need further review. Read [SECURITY.md](SECURITY.md) before use and [FORK.md](FORK.md) for scope and next steps. Fork release identity and signed releases are pending.
+HLS uses plain HTTP: its session token does not make the stream confidential. Use a trusted LAN. The Cast control connection accepts receiver certificates without authenticating the receiver. WebRTC audio is playback capture without the microphone. **Sound from any app that allows audio capture is sent to the TV, even if you share only one app** (verified on a device: sharing Maps sent a movie playing in Chrome). Anything playing media or game audio on the phone can be heard on the TV. (details and limits in [WEBRTC.md](WEBRTC.md)). WebRTC media is encrypted with DTLS-SRTP (the app sets no option that disables encryption), but the receiver is not authenticated: the Cast control channel accepts any certificate and carries the DTLS fingerprint, so a LAN attacker who impersonates the receiver could receive the stream. HLS (not WebRTC) is plaintext HTTP. Read [SECURITY.md](SECURITY.md) before use and [FORK.md](FORK.md) for scope and next steps. Fork release identity and signed releases are pending.
 
 ## Upstream documentation (inherited)
 

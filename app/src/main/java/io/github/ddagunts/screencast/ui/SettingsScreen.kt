@@ -52,6 +52,7 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
     val webRtcPreset by webRtcVm.videoPreset.collectAsStateWithLifecycle()
     val webRtcBitrate by webRtcVm.maxBitrateMbps.collectAsStateWithLifecycle()
     val webRtcCodec by webRtcVm.videoCodecPreference.collectAsStateWithLifecycle()
+    val webRtcAudio by webRtcVm.audioEnabled.collectAsStateWithLifecycle()
     val webRtcCasting = webRtcSession != null
     // Stream config is shared across every active session, so we can only
     // edit it when *no* casts are live. A change mid-cast would invalidate
@@ -256,15 +257,7 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            Text("WebRTC is video-only. Audio stays off until capture without microphone access is reviewed.")
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Audio (unsupported)", modifier = Modifier.weight(1f))
-                Switch(
-                    checked = false,
-                    onCheckedChange = null,
-                    enabled = false,
-                )
-            }
+            WebRtcAudioSetting(requested = webRtcAudio, enabled = !webRtcCasting, onChange = { webRtcVm.setAudioEnabled(it) })
         }
     }
 }
