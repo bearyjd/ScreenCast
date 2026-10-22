@@ -49,6 +49,7 @@ class WebRtcCastSessionTest {
     }
     private class Peer : SessionPeer {
         override val connectionState = MutableStateFlow(PeerConnectionState.NEW)
+        override val codecMismatch = MutableStateFlow<String?>(null)
         var closeCount = 0
         var buildFails = false
         var offerFails = false
@@ -98,6 +99,24 @@ class WebRtcCastSessionTest {
         assertEquals(failure, session.state.value)
         assertEquals(1, peer.closeCount)
         assertEquals(1, transport.closeCount)
+    }
+
+    @Test fun `peer codec mismatch reaches the session and stops after close`() = runTest {
+        val transport = Transport()
+        val peer = Peer()
+        val session = WebRtcCastSession(context, CastDevice("TV", "192.0.2.1", 8009), config,
+            transport, { peer }, StandardTestDispatcher(testScheduler))
+        assertNull(session.codecMismatch.value)
+        val start = launch { session.startCast("receiver", Intent()) {} }
+        runCurrent(); transport.ready(); advanceTimeBy(50); runCurrent(); start.join()
+        peer.codecMismatch.value = "Requested H.264 but the TV chose VP8"
+        runCurrent()
+        assertEquals("Requested H.264 but the TV chose VP8", session.codecMismatch.value)
+        session.close()
+        runCurrent()
+        peer.codecMismatch.value = "late"
+        runCurrent()
+        assertEquals("Requested H.264 but the TV chose VP8", session.codecMismatch.value)
     }
 
     @Test fun `every startup failure closes resources and preserves an actionable error`() = runTest {

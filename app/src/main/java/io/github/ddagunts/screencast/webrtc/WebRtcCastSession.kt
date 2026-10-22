@@ -72,6 +72,9 @@ class WebRtcCastSession internal constructor(
     // Receiver-level volume: works exactly the same as in HLS mode — volume
     // lives on the device (Chromecast), not the media session, so we can send
     // SET_VOLUME without a transportId. UI hides the slider when isFixed.
+    private val _codecMismatch = MutableStateFlow<String?>(null)
+    val codecMismatch: StateFlow<String?> = _codecMismatch
+
     private val _volume = MutableStateFlow(CastVolume())
     val volume: StateFlow<CastVolume> = _volume
 
@@ -190,6 +193,7 @@ class WebRtcCastSession internal constructor(
         // never happens within 15 s the ICE most likely failed; we leave the
         // session in Signaling so the UI surfaces "connecting" rather than a
         // misleading Casting state.
+        s.launch { p.codecMismatch.collect { _codecMismatch.value = it } }
         s.launch {
             p.connectionState.collect { cs ->
                 when (cs.name) {

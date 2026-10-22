@@ -99,6 +99,7 @@ class VideoStatsSampler(
     private val log: (String) -> Unit,
     private val warn: (String) -> Unit = {},
     private val intervalMs: Long = 3_000,
+    private val onSample: (VideoStatsSample) -> Unit = {},
 ) {
     suspend fun run() {
         var prev: VideoStatsSample? = null
@@ -113,6 +114,7 @@ class VideoStatsSampler(
             }
             if (sample != null) {
                 log(formatVideoStats(sample, prev))
+                onSample(sample)
                 prev = sample
             }
             delay(intervalMs)

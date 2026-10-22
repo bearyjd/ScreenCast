@@ -6,6 +6,7 @@ import io.github.ddagunts.screencast.cast.CastChannel
 import io.github.ddagunts.screencast.cast.CastMessage
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.webrtc.IceCandidate
 import org.webrtc.PeerConnection
@@ -27,6 +28,8 @@ internal class CastSessionTransport(host: String, port: Int) : SessionTransport 
 
 internal interface SessionPeer {
     val connectionState: StateFlow<PeerConnection.PeerConnectionState>
+    // Non-null once the negotiated codec differs from the requested one.
+    val codecMismatch: StateFlow<String?> get() = NO_CODEC_MISMATCH
     fun build()
     fun addScreenSource(data: Intent, onProjectionStopped: () -> Unit)
     suspend fun createOffer(): String
@@ -34,3 +37,5 @@ internal interface SessionPeer {
     fun addRemoteIceCandidate(candidate: IceCandidate)
     fun close()
 }
+
+private val NO_CODEC_MISMATCH: StateFlow<String?> = MutableStateFlow(null)

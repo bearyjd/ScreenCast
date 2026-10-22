@@ -78,6 +78,16 @@ internal class WebRtcPeer(
     private val _connectionState = MutableStateFlow(PeerConnection.PeerConnectionState.NEW)
     override val connectionState: StateFlow<PeerConnection.PeerConnectionState> = _connectionState
 
+    private val _codecMismatch = MutableStateFlow<String?>(null)
+    override val codecMismatch: StateFlow<String?> = _codecMismatch
+    private val mismatchReporter = CodecMismatchReporter(
+        requested = config.videoCodecPreference,
+        warn = { logW(it) },
+        publish = { _codecMismatch.value = it },
+        applied = { codecApplied },
+    )
+    @Volatile private var codecApplied = true
+
     // Factory init is a process-wide singleton call inside libwebrtc — guard
     // against callers doing it multiple times in a single app lifetime. The
     // static init is cheap after the first call, but the AAR's native code
@@ -280,6 +290,7 @@ internal class WebRtcPeer(
             logW("video codec preference failed, using defaults: ${e.javaClass.simpleName}")
             false
         }
+        codecApplied = applied
         logI("video codec preference: $pref (applied=$applied)")
     }
 
@@ -293,7 +304,7 @@ internal class WebRtcPeer(
         samplerScope.launch {
             _connectionState.collectLatest { state ->
                 if (state == PeerConnection.PeerConnectionState.CONNECTED) {
-                    VideoStatsSampler(fetch = ::fetchStats, log = { logI(it) }, warn = { logW(it) }).run()
+                    VideoStatsSampler(fetch = ::fetchStats, log = { logI(it) }, warn = { logW(it) }, onSample = mismatchReporter::onSample).run()
                 }
             }
         }

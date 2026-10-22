@@ -251,7 +251,7 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
                 )
             }
             Text(
-                "Takes effect on next cast; the TV must support the codec",
+                "Auto uses the library default, often software VP8, which can be much slower. Takes effect on next cast; the TV must support the codec.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
