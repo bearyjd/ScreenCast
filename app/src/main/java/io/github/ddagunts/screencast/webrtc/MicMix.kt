@@ -107,20 +107,25 @@ internal class MicMixController(
             runCatching { src?.release() }
             return failStart(MicMixStatus.FAILED, "microphone could not start; casting playback audio only")
         }
+        // The reader thread owns the record's release: it releases after its loop exits, so the record
+        // is never released while a read is in flight. The thread is created (not started) first so it
+        // is adopted together with the source and stop() always sees both.
+        val reader = runCatching { spawn(Runnable { try { while (pumpOnce()) { /* until stopped or failed */ } } finally { releaseSource(src) } }) }
+        reader.exceptionOrNull()?.let {
+            runCatching { src!!.release() }
+            return failStart(MicMixStatus.FAILED, "could not create the microphone reader thread ($it); casting playback audio only")
+        }
         val adopted = synchronized(lock) {
-            if (state == MicMixStatus.STARTING) { source = src; state = MicMixStatus.ACTIVE; true } else false
+            if (state == MicMixStatus.STARTING) { source = src; thread = reader.getOrNull(); state = MicMixStatus.ACTIVE; true } else false
         }
         if (!adopted) { // stop() won the race while the record was being created
             runCatching { src!!.stop() }; runCatching { src!!.release() }
             return state
         }
         log("mic mix: microphone mix active")
-        val t = runCatching { spawn(Runnable { while (pumpOnce()) { /* until stopped or failed */ } }).also { it.start() } }
-        if (t.isFailure) {
-            degrade("could not start the microphone reader thread (${t.exceptionOrNull()})")
-            return state
+        runCatching { reader.getOrThrow().start() }.onFailure {
+            degrade("could not start the microphone reader thread ($it)")
         }
-        synchronized(lock) { if (state == MicMixStatus.ACTIVE) thread = t.getOrNull() }
         return state
     }
 
@@ -191,7 +196,8 @@ internal class MicMixController(
         runCatching { s?.stop() } // unblocks the reader
         if (wasActive) log("mic mix: microphone stopped")
         if (t != null && t !== Thread.currentThread()) runCatching { t.join(JOIN_MS) }
-        releaseSource(s)
+        // A live reader releases the record itself once its read returns; never release under it.
+        if (t == null || !t.isAlive) releaseSource(s)
         ring.clear()
     }
 
@@ -201,8 +207,11 @@ internal class MicMixController(
         if (runCatching { runAsync(Runnable { stop() }) }.isFailure) stop()
     }
 
+    private val released = AtomicBoolean(false)
+
+    /** Exactly once per controller (one source per controller), from whichever side finishes with it. */
     private fun releaseSource(s: MicSource?) {
-        if (s == null) return
+        if (s == null || !released.compareAndSet(false, true)) return
         runCatching { s.stop() }
         runCatching { s.release() }
     }

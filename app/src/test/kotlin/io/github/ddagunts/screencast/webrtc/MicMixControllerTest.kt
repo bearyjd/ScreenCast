@@ -379,4 +379,49 @@ class MicMixControllerTest {
         val c = MicMixController({ true }, { FakeMic(startOk = false) }, { }, onDisplay = { throw IllegalStateException("ui") })
         assertEquals(MicMixStatus.FAILED, c.start())
     }
+
+    // ---- release ownership (L3): the reader thread releases, never while a read is in flight ----
+    private class EventMic(val unblockOnStop: Boolean) : MicSource {
+        val events: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+        val inRead = java.util.concurrent.CountDownLatch(1)
+        val unblock = java.util.concurrent.CountDownLatch(1)
+        override val initialized = true
+        override fun start() = true
+        override fun read(dst: ShortArray, size: Int): Int {
+            inRead.countDown(); unblock.await(); events += "readEnd"; return -1
+        }
+        override fun stop() { events += "stop"; if (unblockOnStop) unblock.countDown() }
+        override fun release() { events += "release" }
+    }
+
+    @Test fun `release happens once, after the last read returned, when stop unblocks the read`() {
+        val m = EventMic(unblockOnStop = true)
+        val c = MicMixController({ true }, { m }, { })
+        c.start(); assertTrue(m.inRead.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        c.stop()
+        awaitEvent(m, "release")
+        assertEquals(1, m.events.count { it == "release" })
+        assertTrue(m.events.indexOf("release") > m.events.indexOf("readEnd"))
+    }
+
+    @Test fun `a stuck read outliving the join timeout is never released under the reader`() {
+        val m = EventMic(unblockOnStop = false)
+        val c = MicMixController({ true }, { m }, { })
+        c.start(); assertTrue(m.inRead.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        c.stop() // join times out: the reader is still inside read()
+        assertEquals("must not release while the reader is alive", 0, m.events.count { it == "release" })
+        m.unblock.countDown()
+        awaitEvent(m, "release")
+        assertEquals(1, m.events.count { it == "release" })
+        assertTrue(m.events.indexOf("release") > m.events.indexOf("readEnd"))
+        c.stop() // idempotent: no second release
+        Thread.sleep(50)
+        assertEquals(1, m.events.count { it == "release" })
+    }
+
+    private fun awaitEvent(m: EventMic, e: String) {
+        val end = System.nanoTime() + 3_000_000_000L
+        while (e !in m.events && System.nanoTime() < end) Thread.sleep(5)
+        assertTrue("timed out waiting for $e: ${m.events}", e in m.events)
+    }
 }
