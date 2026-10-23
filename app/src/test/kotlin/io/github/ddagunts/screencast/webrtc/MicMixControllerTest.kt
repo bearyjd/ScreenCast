@@ -461,4 +461,21 @@ class MicMixControllerTest {
         for (st in listOf("DISCONNECTED", "FAILED", "CLOSED")) assertTrue(st, s.getValue(org.webrtc.PeerConnection.IceConnectionState.valueOf(st)))
         for (st in listOf("NEW", "CHECKING", "CONNECTED", "COMPLETED")) assertFalse(st, s.getValue(org.webrtc.PeerConnection.IceConnectionState.valueOf(st)))
     }
+
+    // ---- gate diagnostic (item 5) ----
+    @Test fun `callback logs once when the gate never opens while the mic is active`() {
+        val c = activeCtl(50)
+        val log = mutableListOf<String>()
+        val cb = MicMixBufferCallback(Spy(), c, { true }, { log += it }, gateWatch = GateOpenWatch(limitFrames = 4))
+        repeat(5) { cb.onBuffer(pcm(2000, 2000, 2000, 2000), 2, 2, 48000, 8, 0) }
+        assertEquals(1, log.count { it.contains("gate never opened") })
+    }
+
+    @Test fun `callback does not log the gate diagnostic when speech opens the gate`() {
+        val c = activeCtl(5000)
+        val log = mutableListOf<String>()
+        val cb = MicMixBufferCallback(Spy(), c, { true }, { log += it }, gate = fastGate(), gateWatch = GateOpenWatch(limitFrames = 4))
+        repeat(5) { cb.onBuffer(pcm(2000, 2000, 2000, 2000), 2, 2, 48000, 8, 0) }
+        assertEquals(0, log.count { it.contains("gate never opened") })
+    }
 }

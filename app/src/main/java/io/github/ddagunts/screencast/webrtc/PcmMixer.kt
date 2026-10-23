@@ -72,6 +72,25 @@ internal class FeedbackGuard(
     }
 }
 
+/** Seconds of mic activity with the gate never opening before a one-time diagnostic is logged. */
+internal const val GATE_NEVER_OPENED_SECONDS = 30
+
+/** One-shot diagnostic: reports once when the gate has not opened in [limitFrames] frames of mic activity. */
+internal class GateOpenWatch(private val limitFrames: Int = GATE_NEVER_OPENED_SECONDS * 48_000) {
+    private var frames = 0L
+    private var done = false
+
+    /** True exactly once, when [limitFrames] frames passed without the gate ever opening. */
+    fun onBlock(gateOpen: Boolean, blockFrames: Int): Boolean {
+        if (done) return false
+        if (gateOpen) { done = true; return false }
+        frames += blockFrames
+        if (frames < limitFrames) return false
+        done = true
+        return true
+    }
+}
+
 /**
  * Pure PCM16 mixing for the opt-in microphone mix. No Android types.
  *

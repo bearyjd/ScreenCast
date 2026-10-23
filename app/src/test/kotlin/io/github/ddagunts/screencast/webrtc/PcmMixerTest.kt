@@ -189,4 +189,17 @@ class PcmMixerTest {
         assertTrue(FEEDBACK_LIMIT_SAMPLES >= 48_000 * 2)
         assertTrue(FEEDBACK_PEAK_THRESHOLD in 4000..30000)
     }
+
+    @Test fun `gate watch reports once when the gate never opens`() {
+        val w = GateOpenWatch(limitFrames = 100)
+        assertFalse(w.onBlock(false, 99))
+        assertTrue(w.onBlock(false, 1))
+        assertFalse(w.onBlock(false, 500))
+    }
+
+    @Test fun `gate watch stays silent once the gate has opened`() {
+        val w = GateOpenWatch(limitFrames = 100)
+        assertFalse(w.onBlock(false, 50)); assertFalse(w.onBlock(true, 10))
+        assertFalse(w.onBlock(false, 10_000))
+    }
 }

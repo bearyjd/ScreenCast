@@ -267,6 +267,7 @@ internal class MicMixBufferCallback(
     private val log: (String) -> Unit,
     private val gate: MicGate = MicGate(),
     private val feedback: FeedbackGuard = FeedbackGuard(),
+    private val gateWatch: GateOpenWatch = GateOpenWatch(),
 ) : JavaAudioDeviceModule.AudioBufferCallback {
     private var scratch = ShortArray(MIC_MIX_SAMPLE_RATE / 50)
     @Volatile private var broken = false
@@ -293,6 +294,9 @@ internal class MicMixBufferCallback(
             val got = mic.fillMic(scratch, frames)
             // Base offset 0: libwebrtc fills the direct buffer from index 0 regardless of position().
             PcmMixer.mixMonoIntoStereo(buffer, 0, bytesRead, scratch, got, gate)
+            if (!mic.isSilent && gateWatch.onBlock(gate.isOpen, frames)) {
+                log("mic mix: gate never opened in $GATE_NEVER_OPENED_SECONDS s while the mic is active; speech may be below the gate threshold ($MIC_GATE_OPEN_THRESHOLD raw, about -27 dBFS)")
+            }
             if (feedback.onBlock(gate.takeBlockPeak(), frames)) {
                 broken = true
                 log("mic mix: sustained loud microphone level (feedback from the TV speaker?); microphone mix muted for this cast")
