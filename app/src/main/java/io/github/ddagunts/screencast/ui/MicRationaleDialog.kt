@@ -30,7 +30,9 @@ fun MicRationaleDialog(
         if (step.effect == MicDialogEffect.MARK_SHOWN_AND_REQUEST) onRequestMic()
     }
     LaunchedEffect(ready) { if (ready) apply(MicDialogEvent.Evaluate(evaluate())) }
-    if (!visible) return
+    // Also gate on [ready]: after an activity recreate rememberSaveable restores visible = true
+    // before launch permission prompts settle, which would stack this under a system dialog.
+    if (!visible || !ready) return
     AlertDialog(
         onDismissRequest = { apply(MicDialogEvent.Dismiss) },
         title = { Text("Share audio?") },
