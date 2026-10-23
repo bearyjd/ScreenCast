@@ -450,6 +450,9 @@ internal class WebRtcPeer(
         }
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
             logI("ice state: $state")
+            // The mic must not outlive a dead link. A transient DISCONNECTED that recovers does not
+            // restart it: a stopped controller never restarts (privacy over convenience).
+            if (shouldStopMicOnIce(state)) micMix?.stopAsync()
         }
         override fun onIceConnectionReceivingChange(receiving: Boolean) {}
         override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {

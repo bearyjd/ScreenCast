@@ -424,4 +424,41 @@ class MicMixControllerTest {
         while (e !in m.events && System.nanoTime() < end) Thread.sleep(5)
         assertTrue("timed out waiting for $e: ${m.events}", e in m.events)
     }
+
+    // ---- record with no consumer (L4) ----
+    private fun clockedCtl(m: MicSource, log: MutableList<String>, now: java.util.concurrent.atomic.AtomicLong) =
+        MicMixController({ true }, { m }, { log += it }, spawn = { Thread {} }, runAsync = { it.run() }, clock = { now.get() })
+
+    @Test fun `active mic with no consumer for 2 s stops and logs once`() {
+        val m = FakeMic(onRead = { d -> d[0] = 5; 1 })
+        val log = mutableListOf<String>(); val now = java.util.concurrent.atomic.AtomicLong(1_000)
+        val c = clockedCtl(m, log, now)
+        c.start()
+        now.set(1_000 + MIC_NO_CONSUMER_MS)
+        assertTrue(c.pumpOnce()) // exactly at the limit is still fine
+        now.set(1_000 + MIC_NO_CONSUMER_MS + 1)
+        assertFalse(c.pumpOnce())
+        assertEquals(MicMixStatus.STOPPED, c.status); assertEquals(1, m.released)
+        assertFalse(c.pumpOnce()); assertFalse(c.pumpOnce())
+        assertEquals(1, log.count { it.contains("no consumer") })
+    }
+
+    @Test fun `a consumer pulling samples keeps the mic running and re-arms the timeout`() {
+        val m = FakeMic(onRead = { d -> d[0] = 5; 1 })
+        val log = mutableListOf<String>(); val now = java.util.concurrent.atomic.AtomicLong(0)
+        val c = clockedCtl(m, log, now)
+        c.start()
+        val d = ShortArray(4)
+        for (t in listOf(1_500L, 3_000L, 4_400L)) { now.set(t); c.fillMic(d, 4); assertTrue(c.pumpOnce()) }
+        assertEquals(MicMixStatus.ACTIVE, c.status)
+        now.set(4_400 + MIC_NO_CONSUMER_MS + 1)
+        assertFalse(c.pumpOnce()); assertEquals(MicMixStatus.STOPPED, c.status)
+    }
+
+    // ---- ICE state (L4) ----
+    @Test fun `ICE disconnected failed and closed stop the mic, healthy states do not`() {
+        val s = org.webrtc.PeerConnection.IceConnectionState.values().associateWith { shouldStopMicOnIce(it) }
+        for (st in listOf("DISCONNECTED", "FAILED", "CLOSED")) assertTrue(st, s.getValue(org.webrtc.PeerConnection.IceConnectionState.valueOf(st)))
+        for (st in listOf("NEW", "CHECKING", "CONNECTED", "COMPLETED")) assertFalse(st, s.getValue(org.webrtc.PeerConnection.IceConnectionState.valueOf(st)))
+    }
 }

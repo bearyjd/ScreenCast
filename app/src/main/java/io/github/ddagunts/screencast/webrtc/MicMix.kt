@@ -44,6 +44,16 @@ private const val MAX_EMPTY_READS = 100
 /** Consecutive all-zero 10 ms reads (~2 s) before the mic is reported silent. */
 internal const val MIC_SILENT_READS = 200
 private const val JOIN_MS = 300L
+/** An ACTIVE mic that nobody has pulled samples from for this long is recording for no reason. */
+internal const val MIC_NO_CONSUMER_MS = 2_000L
+
+/** Peer ICE states after which the cast is not (or no longer reliably) delivering audio: the mic stops. */
+internal fun shouldStopMicOnIce(state: org.webrtc.PeerConnection.IceConnectionState): Boolean = when (state) {
+    org.webrtc.PeerConnection.IceConnectionState.DISCONNECTED,
+    org.webrtc.PeerConnection.IceConnectionState.FAILED,
+    org.webrtc.PeerConnection.IceConnectionState.CLOSED -> true
+    else -> false
+}
 
 /**
  * Owns the mic record and reader thread. Any failure degrades to playback-only; it never throws.
@@ -57,6 +67,8 @@ internal class MicMixController(
     private val runAsync: (Runnable) -> Unit = { Thread(it, "mic-mix-stop").apply { isDaemon = true }.start() },
     /** Told every time the user-visible mic state changes (notification truthfulness). Must not block. */
     private val onDisplay: (MicMixDisplay) -> Unit = {},
+    /** Monotonic milliseconds; injectable for tests. */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     private val lock = Any()
     private val ring = MicRingBuffer(RING_SAMPLES)
@@ -64,6 +76,9 @@ internal class MicMixController(
     private var emptyReads = 0
     private var zeroReads = 0
     private var primed = false // audio thread only
+    @Volatile private var lastFillMs = Long.MIN_VALUE
+    @Volatile private var activeSinceMs = 0L
+    private var noConsumerLogged = false // reader thread only
     private val displayLock = Any()
     @Volatile private var state = MicMixStatus.IDLE
         set(v) { field = v; publishDisplay() }
@@ -116,7 +131,7 @@ internal class MicMixController(
             return failStart(MicMixStatus.FAILED, "could not create the microphone reader thread ($it); casting playback audio only")
         }
         val adopted = synchronized(lock) {
-            if (state == MicMixStatus.STARTING) { source = src; thread = reader.getOrNull(); state = MicMixStatus.ACTIVE; true } else false
+            if (state == MicMixStatus.STARTING) { activeSinceMs = clock(); source = src; thread = reader.getOrNull(); state = MicMixStatus.ACTIVE; true } else false
         }
         if (!adopted) { // stop() won the race while the record was being created
             runCatching { src!!.stop() }; runCatching { src!!.release() }
@@ -143,6 +158,12 @@ internal class MicMixController(
             -1
         }
         if (state != MicMixStatus.ACTIVE) return false
+        if (clock() - maxOf(lastFillMs, activeSinceMs) > MIC_NO_CONSUMER_MS) {
+            // Recording with nobody mixing the samples (ADM not delivering): do not keep the mic open.
+            if (!noConsumerLogged) { noConsumerLogged = true; log("mic mix: no consumer for the microphone samples for ${MIC_NO_CONSUMER_MS} ms; microphone stopped") }
+            stopAsync()
+            return false
+        }
         when {
             n < 0 -> return degrade("microphone read failed ($n)")
             n == 0 -> if (++emptyReads >= MAX_EMPTY_READS) return degrade("microphone returned no data")
@@ -177,6 +198,7 @@ internal class MicMixController(
      * Trims the ring to the latency target on the first read and above the high-water mark.
      */
     fun fillMic(dst: ShortArray, count: Int): Int {
+        lastFillMs = clock()
         if (!primed || ring.available > MIC_RING_HIGH_WATER_SAMPLES) { primed = true; ring.trimTo(MIC_RING_TARGET_SAMPLES) }
         return ring.read(dst, count)
     }
