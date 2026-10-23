@@ -1,0 +1,10 @@
+*
+!receiver/index.html
+!receiver/receiver.js
+!tools/cast-sim
+tools/cast-sim/node_modules
+tools/cast-sim/out
+tools/cast-sim/.omc
+tools/cast-sim/REVIEW-FIXES-TDD.md
+tools/cast-sim/*.md
+!tools/cast-sim/README.md
