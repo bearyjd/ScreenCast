@@ -4,6 +4,48 @@ All notable changes to ScreenCast are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0-rc1]
+
+### Added
+- Android Share → "Cast shared media" for a single MP4/MP3 URL.
+- Developer-only `tools/cast-sim`: software Cast receiver and latency harness.
+- Opt-in "Mix in microphone" for WebRTC audio (Android 11+, default OFF),
+  using a separate recorder, a consent dialog on every enable, a noise gate
+  and a feedback guard. There is no echo cancellation: headphones on the
+  phone do not prevent echo from a loud TV near the phone.
+- Experimental "Mute phone while casting" (default OFF): uses the media
+  stream mute flag and restores it at stop, subject to Android restrictions.
+- Shared WebRTC stream ID helper for A/V lip-sync experiments, behind a
+  compile-time flag that is OFF by default.
+- HLS "Share phone audio" banner to help recover missing audio permission.
+
+### Changed
+- Microphone permission is explained once with a dialog instead of a bare
+  prompt at every launch; the dialog is hidden below Android 10.
+- WebRTC playback audio works without using the microphone.
+
+### Security / Privacy
+- The microphone is used only when "Mix in microphone" is on. The manifest
+  adds `FOREGROUND_SERVICE_MICROPHONE` and the `microphone` foreground
+  service type; that type is requested only for an opted-in microphone mix.
+- The Cast channel still trusts any TLS certificate and performs no Cast
+  device authentication. This pre-existing behavior is now pinned by tests
+  and documented in `SECURITY.md`.
+
+### Known limitations / not verified on device
+- No A/V sync fix is claimed; the shared stream ID experiment still needs
+  device measurements, and sync and latency remain unverified.
+- Microphone echo behavior and noise-gate / feedback-guard thresholds are
+  untuned on devices. Loud TV audio can enter the microphone mix.
+- The experimental mute setting was checked once on a Pixel 10 Pro Fold
+  (Android 17): with the phone muted, the TV still played the cast audio
+  and the phone stayed silent, and the mute was lifted at stop. Other
+  devices and Bluetooth/headphone outputs are untested.
+- Android 17 AudioHardening has been reported to log that app volume
+  control "would be ignored" while the app is backgrounded. If Android
+  enforces this, unmute-at-stop could also be ignored; this is unverified.
+
+
 ## [0.14.1]
 
 ### Changed
