@@ -17,11 +17,11 @@ fun MuteWhileCastingSetting(checked: Boolean, enabled: Boolean, onChange: (Boole
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange),
     ) {
-        Text("Mute phone while casting", modifier = Modifier.weight(1f))
+        Text("Mute phone while casting (experimental)", modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
     Text(
-        "Mutes this phone's media output while casting and unmutes it when the cast stops. If you unmute or change the volume yourself during the cast, it is left as you set it.",
+        "Experimental. Mutes this phone's media output (including navigation voice and text-to-speech) while casting and unmutes it when the cast stops. If you unmute the phone during the cast, it stays unmuted. Unverified: on some devices this may also silence the TV.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

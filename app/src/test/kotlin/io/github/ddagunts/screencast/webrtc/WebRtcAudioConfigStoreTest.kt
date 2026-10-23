@@ -77,10 +77,16 @@ class MuteWhileCastingStoreTest {
     @Test fun `prefs marker store round trips and clears`() {
         val s = PrefsMuteMarkerStore(ctx)
         assertEquals(null, s.read())
-        s.write(MuteMarker("abc", 99L))
-        assertEquals(MuteMarker("abc", 99L), PrefsMuteMarkerStore(ctx).read())
+        s.write(MuteMarker("abc", 5, 99L))
+        assertEquals(MuteMarker("abc", 5, 99L), PrefsMuteMarkerStore(ctx).read())
         s.clear()
         assertEquals(null, PrefsMuteMarkerStore(ctx).read())
+    }
+
+    @Test fun `old format prefs marker reads back as stale boot count`() {
+        ctx.getSharedPreferences("webrtc_mute_marker", Context.MODE_PRIVATE).edit()
+            .putString("session_id", "x").putLong("timestamp_ms", 5L).commit()
+        assertEquals(-1, PrefsMuteMarkerStore(ctx).read()?.bootCount)
     }
 
     @Test fun `marker store write and clear use synchronous commit never apply`() {
@@ -94,12 +100,13 @@ class MuteWhileCastingStoreTest {
                     override fun commit(): Boolean { calls += "commit"; return e.commit() }
                     override fun putString(k: String?, v: String?) = also { e.putString(k, v) }
                     override fun putLong(k: String?, v: Long) = also { e.putLong(k, v) }
+                    override fun putInt(k: String?, v: Int) = also { e.putInt(k, v) }
                     override fun clear() = also { e.clear() }
                 }
             }
         }
         val s = PrefsMuteMarkerStore(prefs)
-        s.write(MuteMarker("abc", 1L))
+        s.write(MuteMarker("abc", 5, 1L))
         s.clear()
         assertEquals(listOf("commit", "commit"), calls)
     }

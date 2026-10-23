@@ -3,12 +3,16 @@ package io.github.ddagunts.screencast.webrtc
 import android.content.Context
 import android.content.SharedPreferences
 import android.media.AudioManager
+import android.os.SystemClock
+import android.provider.Settings
 import io.github.ddagunts.screencast.util.LogRepository
 
 // Opt-in "mute phone while casting". Only STREAM_MUSIC is touched (never ringer/DND), and only via
 // the stream's mute flag: Android keeps a separate volume per output device, so we never store or
 // restore a volume number. We unmute only if the stream is still muted, so a user who unmuted (or
-// never muted via us) is left alone. A marker records that WE muted, so a dead process is recovered.
+// never muted via us) is left alone. A marker records that WE muted, so a dead process is recovered,
+// but only while the marker is fresh (same boot, within MARKER_MAX_AGE_MS): a stale marker is cleared
+// without unmuting, so it can never undo a deliberate later mute by the user.
 
 interface MediaVolumeControl {
     fun isVolumeFixed(): Boolean
@@ -17,7 +21,10 @@ interface MediaVolumeControl {
     fun unmute()
 }
 
-data class MuteMarker(val sessionId: String, val timestampMs: Long)
+// bootCount < 0 means unknown/old format; elapsedMs is SystemClock.elapsedRealtime() at mute time.
+data class MuteMarker(val sessionId: String, val bootCount: Int, val elapsedMs: Long)
+
+const val MARKER_MAX_AGE_MS = 6L * 60 * 60 * 1000
 
 interface MuteMarkerStore {
     fun read(): MuteMarker?
@@ -29,7 +36,8 @@ interface MuteMarkerStore {
 class MediaMuteGuard(
     private val volume: MediaVolumeControl,
     private val store: MuteMarkerStore,
-    private val clock: () -> Long = System::currentTimeMillis,
+    private val clock: () -> Long = SystemClock::elapsedRealtime,
+    private val bootCount: () -> Int = { -1 },
     private val log: (String) -> Unit = { LogRepository.log(LogRepository.Level.W, "MediaMuteGuard", it) },
 ) {
     private val lock = Any()
@@ -41,17 +49,30 @@ class MediaMuteGuard(
         if (fixed) { log("fixed-volume device: mute while casting skipped"); return }
         val muted = attempt("read mute state") { volume.isMuted() }.getOrNull() ?: return
         if (muted) return // the user's own mute stays; we neither mark nor undo it
-        if (attempt("write mute marker") { store.write(MuteMarker(sessionId, clock())) }.isFailure) return
-        val applied = attempt("mute") { volume.mute() }.isSuccess &&
-            attempt("verify mute") { volume.isMuted() }.getOrNull() == true
-        if (!applied) attempt("clear mute marker") { store.clear() }
+        if (attempt("write mute marker") { store.write(MuteMarker(sessionId, bootCount(), clock())) }.isFailure) return
+        attempt("mute") { volume.mute() }
+        // Whatever mute() reported, trust only the stream: keep the marker if it is muted or unreadable.
+        if (attempt("verify mute") { volume.isMuted() }.getOrNull() == false) attempt("clear mute marker") { store.clear() }
     }
 
     fun restore(): Unit = synchronized(lock) { restoreLocked() }
 
     // castActive is re-checked under the lock, immediately before any unmute.
     fun recover(castActive: () -> Boolean): Unit = synchronized(lock) {
-        if (!castActive()) restoreLocked()
+        if (castActive()) return
+        val marker = attempt("read mute marker") { store.read() }.getOrNull() ?: return
+        if (isStale(marker)) {
+            log("stale mute marker cleared without unmuting")
+            attempt("clear mute marker") { store.clear() }
+            return
+        }
+        restoreLocked()
+    }
+
+    private fun isStale(marker: MuteMarker): Boolean {
+        val boot = bootCount()
+        val age = clock() - marker.elapsedMs
+        return marker.bootCount < 0 || boot < 0 || marker.bootCount != boot || age < 0 || age > MARKER_MAX_AGE_MS
     }
 
     private fun restoreLocked() {
@@ -78,7 +99,11 @@ object MediaMuteGuards {
     fun get(context: Context): MediaMuteGuard = instance ?: synchronized(this) {
         instance ?: run {
             val app = context.applicationContext
-            MediaMuteGuard(AudioManagerVolume(app.getSystemService(AudioManager::class.java)), PrefsMuteMarkerStore(app))
+            MediaMuteGuard(
+                AudioManagerVolume(app.getSystemService(AudioManager::class.java)),
+                PrefsMuteMarkerStore(app),
+                bootCount = { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1) },
+            )
         }.also { instance = it }
     }
 }
@@ -87,8 +112,9 @@ class AudioManagerVolume(private val audio: AudioManager?) : MediaVolumeControl 
     private fun am() = checkNotNull(audio) { "no AudioManager" }
     override fun isVolumeFixed() = am().isVolumeFixed
     override fun isMuted() = am().isStreamMute(AudioManager.STREAM_MUSIC)
-    override fun mute() = am().adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0)
-    // FLAG_SHOW_UI so the user sees that the phone is audible again.
+    // FLAG_SHOW_UI so the user sees every change we make to the phone's audio.
+    override fun mute() =
+        am().adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
     override fun unmute() =
         am().adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, AudioManager.FLAG_SHOW_UI)
 }
@@ -102,13 +128,15 @@ class PrefsMuteMarkerStore(private val prefs: SharedPreferences) : MuteMarkerSto
         if (!prefs.contains(KEY_SESSION)) return null
         return MuteMarker(
             sessionId = prefs.getString(KEY_SESSION, "") ?: "",
-            timestampMs = prefs.getLong(KEY_TS, 0L),
+            bootCount = prefs.getInt(KEY_BOOT, -1),
+            elapsedMs = prefs.getLong(KEY_ELAPSED, 0L),
         )
     }
 
     // commit(): the marker must be on disk before the stream is muted, and gone before we forget it.
     override fun write(marker: MuteMarker) {
-        val ok = prefs.edit().putString(KEY_SESSION, marker.sessionId).putLong(KEY_TS, marker.timestampMs).commit()
+        val ok = prefs.edit().putString(KEY_SESSION, marker.sessionId).putInt(KEY_BOOT, marker.bootCount)
+            .putLong(KEY_ELAPSED, marker.elapsedMs).commit()
         check(ok) { "marker commit failed" }
     }
 
@@ -118,6 +146,7 @@ class PrefsMuteMarkerStore(private val prefs: SharedPreferences) : MuteMarkerSto
 
     private companion object {
         const val KEY_SESSION = "session_id"
-        const val KEY_TS = "timestamp_ms"
+        const val KEY_BOOT = "boot_count"
+        const val KEY_ELAPSED = "elapsed_ms"
     }
 }

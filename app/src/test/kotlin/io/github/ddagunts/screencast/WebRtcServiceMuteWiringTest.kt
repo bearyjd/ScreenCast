@@ -16,6 +16,8 @@ import io.github.ddagunts.screencast.webrtc.SessionTransport
 import io.github.ddagunts.screencast.webrtc.WebRtcCastSession
 import io.github.ddagunts.screencast.webrtc.WebRtcConfigStore
 import io.github.ddagunts.screencast.webrtc.WebRtcSessionConfig
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -93,10 +95,14 @@ class WebRtcServiceMuteWiringTest {
     private val store = FakeStore()
 
     @Before fun setUp() {
-        MuteWiringService.guard = MediaMuteGuard(vol, store, clock = { 1L }, log = {})
+        MuteWiringService.guard = MediaMuteGuard(vol, store, clock = { 1L }, bootCount = { 3 }, log = {})
         MuteWiringService.throwOnClose = false
+        WebRtcForegroundService.liveCast = false
     }
-    @After fun tearDown() { MuteWiringService.throwOnClose = false }
+    @After fun tearDown() {
+        MuteWiringService.throwOnClose = false
+        WebRtcForegroundService.liveCast = false
+    }
 
     private fun startIntent() = Intent().setAction(WebRtcForegroundService.ACTION_START)
         .putExtra(WebRtcForegroundService.EXTRA_DEVICE_NAME, "TV")
@@ -182,9 +188,62 @@ class WebRtcServiceMuteWiringTest {
     }
 
     @Test fun `onCreate recovers a stale mute`() = runTest {
-        store.marker = MuteMarker("old", 1L)
+        store.marker = MuteMarker("old", 3, 1L)
         vol.muted = true
         setup(false)
+        assertFalse(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `recover does not unmute while a cast is live in this process`() = runTest {
+        WebRtcForegroundService.liveCast = true
+        store.marker = MuteMarker("live", 3, 1L)
+        vol.muted = true
+        setup(false)
+        assertTrue(vol.muted)
+        assertEquals(MuteMarker("live", 3, 1L), store.marker)
+    }
+
+    @Test fun `stop racing a Casting event that is already waiting on the lock prevents the mute`() = runTest {
+        val svc = setup(true)
+        svc.onStartCommand(startIntent(), 0, 1)
+        runCurrent(); MuteWiringService.transport!!.ready(); advanceTimeBy(50); runCurrent()
+        // Another thread holds the guard lock; the Casting handler parks on it.
+        val holding = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holder = Thread { MuteWiringService.guard.recover { holding.countDown(); release.await(5, TimeUnit.SECONDS); true } }
+        holder.start()
+        assertTrue(holding.await(5, TimeUnit.SECONDS))
+        MuteWiringService.peer!!.connectionState.value = PeerConnectionState.CONNECTED
+        val handler = Thread { runCurrent() }
+        handler.start()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (handler.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.sleep(5)
+        assertEquals(Thread.State.BLOCKED, handler.state)
+        svc.onStartCommand(Intent().setAction(WebRtcForegroundService.ACTION_STOP), 0, 2)
+        release.countDown()
+        handler.join(5000); holder.join(5000)
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertFalse(vol.muted)
+        assertFalse("no mute may follow the stop", vol.events.contains("mute"))
+        assertNull(store.marker)
+    }
+
+    @Test fun `restart right after stop restores before the new mute`() = runTest {
+        val svc = setup(true)
+        reachCasting(svc)
+        svc.onStartCommand(Intent().setAction(WebRtcForegroundService.ACTION_STOP), 0, 2)
+        reachCasting(svc)
+        runCurrent(); advanceTimeBy(600); runCurrent()
+        assertEquals(listOf("mute", "unmute", "mute"), vol.events)
+        assertTrue(vol.muted)
+    }
+
+    @Test fun `onDestroy restores synchronously even though stop restores asynchronously`() = runTest {
+        val svc = setup(true)
+        reachCasting(svc)
+        assertTrue(vol.muted)
+        svc.onDestroy() // no runCurrent: the process may be dying
         assertFalse(vol.muted)
         assertNull(store.marker)
     }

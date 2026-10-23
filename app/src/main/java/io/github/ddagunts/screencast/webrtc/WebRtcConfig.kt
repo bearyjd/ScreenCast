@@ -86,7 +86,8 @@ data class WebRtcSessionConfig(
     // AudioRecord needs RECORD_AUDIO even for playback capture.
     val recordAudioGranted: Boolean = false,
     val sdkInt: Int = Build.VERSION.SDK_INT,
-    // Opt-in: lower phone media volume to 0 for the cast, restore after.
+    // Opt-in, experimental: set the phone's media stream mute flag once the cast is up and clear it
+    // when the cast stops (only if still muted). No volume level is stored or restored.
     val muteWhileCasting: Boolean = false,
 ) {
     // Audio will be attempted. It can still fall back to video-only at runtime.

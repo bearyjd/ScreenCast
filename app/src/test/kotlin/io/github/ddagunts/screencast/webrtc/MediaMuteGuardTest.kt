@@ -15,10 +15,11 @@ internal class FakeVolume(var muted: Boolean = false, var fixed: Boolean = false
     var failUnmute: Throwable? = null
     var failIsMuted: Throwable? = null
     var muteIgnored = false
+    var throwAfterMuteTakesEffect: Throwable? = null
     var onMute: () -> Unit = {}
     override fun isVolumeFixed() = fixed
     override fun isMuted(): Boolean { failIsMuted?.let { throw it }; return muted }
-    override fun mute() { failMute?.let { throw it }; events += "mute"; onMute(); if (!muteIgnored) muted = true }
+    override fun mute() { failMute?.let { throw it }; events += "mute"; onMute(); if (!muteIgnored) muted = true; throwAfterMuteTakesEffect?.let { throw it } }
     override fun unmute() { failUnmute?.let { throw it }; events += "unmute"; muted = false }
 }
 
@@ -34,13 +35,17 @@ class MediaMuteGuardTest {
     private val vol = FakeVolume()
     private val store = FakeStore()
     private val logs = mutableListOf<String>()
-    private fun guard() = MediaMuteGuard(vol, store, clock = { 1234L }, log = { logs += it })
+    private var now = 1234L
+    private var boot = 7
+    private fun guard() = MediaMuteGuard(vol, store, clock = { now }, bootCount = { boot }, log = { logs += it })
+    private fun freshMarker(session: String = "old") = MuteMarker(session, boot, now)
+    private val sixHours = 6L * 60 * 60 * 1000
 
     @Test fun `mute writes marker then mutes and restore unmutes and clears`() {
         val g = guard()
         g.mute("s1")
         assertTrue(vol.muted)
-        assertEquals(MuteMarker("s1", 1234L), store.marker)
+        assertEquals(MuteMarker("s1", 7, 1234L), store.marker)
         g.restore()
         assertFalse(vol.muted)
         assertNull(store.marker)
@@ -91,7 +96,7 @@ class MediaMuteGuardTest {
     }
 
     @Test fun `stale marker with muted stream and idle unmutes and clears`() {
-        store.marker = MuteMarker("old", 1L)
+        store.marker = freshMarker()
         vol.muted = true
         guard().recover { false }
         assertFalse(vol.muted)
@@ -99,14 +104,14 @@ class MediaMuteGuardTest {
     }
 
     @Test fun `stale marker with stream not muted clears only`() {
-        store.marker = MuteMarker("old", 1L)
+        store.marker = freshMarker()
         guard().recover { false }
         assertTrue(vol.events.isEmpty())
         assertNull(store.marker)
     }
 
     @Test fun `recover skips while a cast is active`() {
-        store.marker = MuteMarker("live", 1L)
+        store.marker = freshMarker("live")
         vol.muted = true
         guard().recover { true }
         assertTrue(vol.muted)
@@ -114,7 +119,7 @@ class MediaMuteGuardTest {
     }
 
     @Test fun `recover re-checks cast state under the lock right before unmuting`() {
-        store.marker = MuteMarker("s", 1L)
+        store.marker = freshMarker("s")
         vol.muted = true
         val answers = ArrayDeque(listOf(true))
         guard().recover { answers.removeFirstOrNull() ?: false }
@@ -217,5 +222,75 @@ class MediaMuteGuardTest {
         assertFalse("restore must see the completed mute and undo it", vol.muted)
         assertNull(store.marker)
         assertEquals(listOf("mute", "unmute"), vol.events)
+    }
+
+    @Test fun `marker from another boot is cleared without unmuting`() {
+        store.marker = MuteMarker("old", boot - 1, now)
+        vol.muted = true // a deliberate later mute by the user
+        guard().recover { false }
+        assertTrue(vol.muted)
+        assertTrue(vol.events.isEmpty())
+        assertNull(store.marker)
+    }
+
+    @Test fun `expired marker is cleared without unmuting`() {
+        store.marker = MuteMarker("old", boot, now)
+        now += sixHours + 1
+        vol.muted = true
+        guard().recover { false }
+        assertTrue(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `marker just inside the expiry window still unmutes`() {
+        store.marker = MuteMarker("old", boot, now)
+        now += sixHours
+        vol.muted = true
+        guard().recover { false }
+        assertFalse(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `elapsed clock regression clears without unmuting`() {
+        store.marker = MuteMarker("old", boot, now + 5000)
+        vol.muted = true
+        guard().recover { false }
+        assertTrue(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `old format marker without boot count is stale`() {
+        store.marker = MuteMarker("old", -1, now)
+        vol.muted = true
+        guard().recover { false }
+        assertTrue(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `unreadable current boot count is stale`() {
+        store.marker = freshMarker()
+        vol.muted = true
+        boot = -1
+        guard().recover { false }
+        assertTrue(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `mute that throws after taking effect keeps the marker`() {
+        vol.throwAfterMuteTakesEffect = SecurityException("late")
+        val g = guard()
+        g.mute("s1")
+        assertTrue(vol.muted)
+        assertNotNull(store.marker)
+        vol.throwAfterMuteTakesEffect = null
+        g.restore()
+        assertFalse(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `verification read failing after mute keeps the marker`() {
+        vol.onMute = { vol.failIsMuted = IllegalStateException("boom") }
+        guard().mute("s1")
+        assertNotNull(store.marker)
     }
 }
