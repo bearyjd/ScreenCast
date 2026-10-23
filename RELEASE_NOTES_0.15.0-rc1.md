@@ -41,3 +41,9 @@ Release builds require your own signing credentials; without them the APK
 is unsigned and not installable. Release signing has not been verified here.
 An in-place upgrade requires the same application ID and signing key as
 your installed build.
+
+## Verify your download
+Signing certificate SHA-256 (app-release.apk):
+`54:52:E1:1D:6F:DB:F7:EA:A5:99:00:7A:ED:49:22:94:8F:9A:06:6D:3D:42:6C:E6:97:5A:76:69:81:19:AE:49`
+
+Check with `apksigner verify --print-certs app-release.apk`. Installing over an upstream ScreenCast release will fail (different signing key): uninstall first.
