@@ -3,7 +3,9 @@ package io.github.ddagunts.screencast.webrtc
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class StreamIdsTest {
     @Test fun sharedModeGivesBothTracksTheSameStreamId() {
@@ -21,6 +23,16 @@ class StreamIdsTest {
             webRtcStreamIds(WebRtcTrackKind.VIDEO, shared = false),
             webRtcStreamIds(WebRtcTrackKind.AUDIO, shared = false),
         )
+    }
+
+    // Source-level guard: a revert to hard-coded stream ids in the peer would bypass the flag.
+    @Test fun peerDoesNotHardCodeStreamIds() {
+        val src = listOf(
+            "src/main/java/io/github/ddagunts/screencast/webrtc/WebRtcPeer.kt",
+            "app/src/main/java/io/github/ddagunts/screencast/webrtc/WebRtcPeer.kt",
+        ).map(::File).first { it.exists() }.readText()
+        assertFalse(src.contains("listOf(\"screen-"))
+        assertTrue(src.contains("webRtcStreamIds("))
     }
 
     @Test fun trackIdsStayDistinct() {

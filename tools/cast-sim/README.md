@@ -78,17 +78,29 @@ decode averages, drops, freezes, codec/resolution, ICE RTT, audio jitter/conceal
 
 ## A/B: shared stream id (A/V sync, attended)
 
-The report has no single `audio_vs_video` field; compute it as
-`audio jitterBuffer ms - video jitterBuffer ms` from the two lines of the printed
-report (or `webrtc.audio.jitterBufferDelayAvgMs` minus the video equivalent in `out/*.json`).
+`WEBRTC_SHARED_STREAM_ID_DEFAULT` in `WebRtcConfig.kt` is a compile-time const, so each variant
+(A = `false`, B = `true`) needs its own APK build; there is no runtime switch.
+
+Fields (in `out/*.json` under `webrtc`; the printed report shows the same two jitterBuffer lines):
+`webrtc.video.jitterBufferDelayAvgMs`, `webrtc.audio.jitterBufferDelayAvgMs`, `webrtc.audio.concealedPct`.
+There is no single `audio_vs_video` field; compute audio minus video yourself.
 Earlier measurement: ~84 ms audio vs ~9 ms video (~75 ms delta).
 
-1. Build A (old): as-is, `WEBRTC_SHARED_STREAM_ID_DEFAULT = false` in `WebRtcConfig.kt`. Cast 60 s of
-   playing video+audio to the sim, record the report.
-2. Build B (new): set that constant to `true`, rebuild, same content, same duration, same sim host.
-3. Compare the delta and the audio concealment %. Repeat 3x each; interleave A/B.
+How to read it: a SMALLER audio-minus-video delta shows lip-sync is ENGAGED (libwebrtc delays video up
+to audio). It does not show lip-sync is correct: capture-side audio latency happens before RTP
+timestamps are assigned and is invisible to receiver-side sync.
+
+1. Build A and B from the same commit, differing only in that const. Cast 60 s of the same
+   video+audio content to the sim on the same host; record the report. Repeat 3x each, interleaved A/B.
+2. Decisive check (a): in the offer SDP, `a=msid:screen ...` must appear on BOTH m-lines (audio and
+   video), and in B `webrtc.video.jitterBufferDelayAvgMs` must jump from ~9 ms toward ~80 ms. If not,
+   sync is not engaging and the hypothesis is dead.
+3. Decisive check (b), ground truth: play a flash+beep clip on the phone, film phone and the output
+   at 240 fps, measure flash-to-beep skew with flag off vs on.
+4. Also report end-to-end latency (video latency may rise ~75 ms with B) and `webrtc.audio.concealedPct`.
+
 The sim measures receiver-side jitter buffers only, not perceived lip-sync, TV/HDMI delay, or
-audio choppiness by ear. Treat the result as evidence, not proof. See `av-sync-TDD.md`.
+audio choppiness by ear. Treat the result as evidence, not proof. See `docs/av-sync-TDD.md`.
 
 ## Tests
 

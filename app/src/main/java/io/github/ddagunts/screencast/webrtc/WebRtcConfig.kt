@@ -30,6 +30,8 @@ const val WEBRTC_AUDIO_CHANNELS = 2
 // evt.streams, so this id is cosmetic to it.
 const val WEBRTC_SHARED_STREAM_ID_DEFAULT = false
 const val WEBRTC_SHARED_STREAM_ID = "screen"
+const val WEBRTC_VIDEO_STREAM_ID_LEGACY = "screen-video"
+const val WEBRTC_AUDIO_STREAM_ID_LEGACY = "screen-audio"
 const val WEBRTC_VIDEO_TRACK_ID = "screen0"
 const val WEBRTC_AUDIO_TRACK_ID = "audio0"
 
@@ -37,7 +39,7 @@ enum class WebRtcTrackKind { VIDEO, AUDIO }
 
 fun webRtcStreamIds(kind: WebRtcTrackKind, shared: Boolean = WEBRTC_SHARED_STREAM_ID_DEFAULT): List<String> =
     if (shared) listOf(WEBRTC_SHARED_STREAM_ID)
-    else listOf(if (kind == WebRtcTrackKind.VIDEO) "screen-video" else "screen-audio")
+    else listOf(if (kind == WebRtcTrackKind.VIDEO) WEBRTC_VIDEO_STREAM_ID_LEGACY else WEBRTC_AUDIO_STREAM_ID_LEGACY)
 
 // User-selectable capture presets. Width/height/fps are applied to the
 // ScreenCapturerAndroid.startCapture call. Each preset is a sensible combo

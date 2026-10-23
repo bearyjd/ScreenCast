@@ -213,9 +213,6 @@ internal class WebRtcPeer(
 
         val track = f.createVideoTrack(WEBRTC_VIDEO_TRACK_ID, source)
         videoTrack = track
-        // addTrack with an empty streamIds list emits an a=msid:- line; the
-        // receiver page treats the incoming transceiver as its primary video
-        // stream, so the streamId string itself is cosmetic.
         // Stream ids come from webRtcStreamIds(): separate by default (audio can
         // choppily share a queue with large video frames), or one shared id so
         // libwebrtc lip-syncs the two tracks. See WebRtcConfig.kt.
