@@ -72,8 +72,12 @@ class WebRtcNotificationStopTest {
 
         // Delivering that intent (what the system does on tap) ends the cast and the service.
         svc.onStartCommand(intent, 0, 2)
-        runCurrent()
+        runCurrent(); advanceTimeBy(5_000); runCurrent()
         assertFalse(WebRtcForegroundService.liveCast)
         assertTrue(shadowOf(svc).isStoppedBySelf)
+        // The receiver is actually told to stop: STOP of the receiver session, then channel CLOSE.
+        val sent = MuteWiringService.transport!!.sent.map { it.payloadUtf8 }
+        assertTrue("STOP not sent: $sent", sent.any { it.contains("\"type\":\"STOP\"") && it.contains("session") })
+        assertTrue("CLOSE not sent: $sent", sent.any { it.contains("\"type\":\"CLOSE\"") })
     }
 }

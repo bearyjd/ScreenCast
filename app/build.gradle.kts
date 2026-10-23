@@ -86,6 +86,8 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            // Conscrypt (Robolectric) reflects into InetAddress when a test runs a real TLS server socket.
+            all { it.jvmArgs("--add-opens", "java.base/java.net=ALL-UNNAMED") }
         }
     }
 }
