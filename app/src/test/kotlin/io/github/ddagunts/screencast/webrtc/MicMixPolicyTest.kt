@@ -114,12 +114,27 @@ class MicMixPolicyTest {
         catch (_: SecurityException) { }
     }
 
-    // ---- notification disclosure (D1) ----
-    @Test fun `notification discloses the microphone only while the mix is on`() {
-        assertTrue(webRtcNotificationBody(null, micMixOn = true).contains("Microphone is mixed in"))
-        assertFalse(webRtcNotificationBody(null, micMixOn = false).contains("icrophone"))
-        assertEquals("Tap Stop to end", webRtcNotificationBody(null, micMixOn = false))
-        assertTrue(webRtcNotificationBody("boom", micMixOn = true).startsWith("boom"))
+    // ---- notification disclosure (D1) / truthfulness (L1) ----
+    @Test fun `notification body follows the real mic status`() {
+        assertEquals("Tap Stop to end", webRtcNotificationBody(null, MicMixDisplay.OFF))
+        assertFalse(webRtcNotificationBody(null, MicMixDisplay.OFF).contains("icrophone"))
+        assertEquals("Tap Stop to end \u00B7 Microphone is mixed in", webRtcNotificationBody(null, MicMixDisplay.ACTIVE))
+        assertEquals("Tap Stop to end \u00B7 Microphone mix on, no sound detected", webRtcNotificationBody(null, MicMixDisplay.SILENT))
+        assertEquals("Tap Stop to end \u00B7 Microphone mix stopped", webRtcNotificationBody(null, MicMixDisplay.STOPPED))
+        assertEquals("Tap Stop to end \u00B7 Microphone mix starting", webRtcNotificationBody(null, MicMixDisplay.STARTING))
+        assertTrue(webRtcNotificationBody("boom", MicMixDisplay.ACTIVE).startsWith("boom"))
+        for (d in MicMixDisplay.values()) if (d != MicMixDisplay.ACTIVE) assertFalse(d.name, webRtcNotificationBody(null, d).contains("is mixed in"))
+    }
+
+    @Test fun `display maps every controller status`() {
+        assertEquals(MicMixDisplay.STARTING, micMixDisplay(MicMixStatus.IDLE, false))
+        assertEquals(MicMixDisplay.STARTING, micMixDisplay(MicMixStatus.STARTING, false))
+        assertEquals(MicMixDisplay.ACTIVE, micMixDisplay(MicMixStatus.ACTIVE, false))
+        assertEquals(MicMixDisplay.SILENT, micMixDisplay(MicMixStatus.ACTIVE, true))
+        for (s in listOf(MicMixStatus.DENIED, MicMixStatus.FAILED, MicMixStatus.STOPPED)) {
+            assertEquals(s.name, MicMixDisplay.STOPPED, micMixDisplay(s, false))
+            assertEquals(s.name, MicMixDisplay.STOPPED, micMixDisplay(s, true)) // stale silent flag never shows as on
+        }
     }
 }
 

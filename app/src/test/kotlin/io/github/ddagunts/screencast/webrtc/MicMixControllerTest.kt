@@ -355,4 +355,28 @@ class MicMixControllerTest {
         assertEquals(60, MIC_RING_HIGH_WATER_SAMPLES * 1000 / MIC_MIX_SAMPLE_RATE)
         assertEquals(30, MIC_RING_TARGET_SAMPLES * 1000 / MIC_MIX_SAMPLE_RATE)
     }
+
+    // ---- notification truthfulness (L1) ----
+    @Test fun `controller reports display changes for start, silence, recovery and stop`() {
+        var loud = false
+        val m = FakeMic(onRead = { d -> ShortArray(480) { if (loud) 9 else 0 }.copyInto(d); 480 })
+        val seen = mutableListOf<MicMixDisplay>()
+        val c = MicMixController({ true }, { m }, { }, spawn = { Thread {} }, onDisplay = { seen += it })
+        c.start()
+        assertEquals(MicMixDisplay.ACTIVE, seen.last())
+        repeat(MIC_SILENT_READS) { c.pumpOnce() }
+        assertEquals(MicMixDisplay.SILENT, seen.last())
+        loud = true; c.pumpOnce()
+        assertEquals(MicMixDisplay.ACTIVE, seen.last())
+        c.stop()
+        assertEquals(MicMixDisplay.STOPPED, seen.last())
+    }
+
+    @Test fun `denied and failed starts report STOPPED and a throwing callback is contained`() {
+        val seen = mutableListOf<MicMixDisplay>()
+        MicMixController({ false }, { FakeMic() }, { }, onDisplay = { seen += it }).start()
+        assertEquals(MicMixDisplay.STOPPED, seen.last())
+        val c = MicMixController({ true }, { FakeMic(startOk = false) }, { }, onDisplay = { throw IllegalStateException("ui") })
+        assertEquals(MicMixStatus.FAILED, c.start())
+    }
 }

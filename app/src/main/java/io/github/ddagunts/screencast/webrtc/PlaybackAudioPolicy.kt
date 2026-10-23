@@ -98,10 +98,20 @@ enum class MicMixConsentAction { ENABLE, REQUEST_PERMISSION }
 fun micMixConsentAction(permissionGranted: Boolean): MicMixConsentAction =
     if (permissionGranted) MicMixConsentAction.ENABLE else MicMixConsentAction.REQUEST_PERMISSION
 
-/** Foreground notification body. Discloses the microphone for as long as the mix is configured on for the cast. */
-fun webRtcNotificationBody(errorMessage: String?, micMixOn: Boolean): String {
+/** What the foreground notification says about the mic mix; derived from the controller's real status. */
+enum class MicMixDisplay { OFF, STARTING, ACTIVE, SILENT, STOPPED }
+
+/** Foreground notification body. The microphone line follows the controller's real status, never the config. */
+fun webRtcNotificationBody(errorMessage: String?, display: MicMixDisplay): String {
     val base = errorMessage ?: "Tap Stop to end"
-    return if (micMixOn) "$base \u00B7 Microphone is mixed in" else base
+    val mic = when (display) {
+        MicMixDisplay.OFF -> return base
+        MicMixDisplay.STARTING -> "Microphone mix starting"
+        MicMixDisplay.ACTIVE -> "Microphone is mixed in"
+        MicMixDisplay.SILENT -> "Microphone mix on, no sound detected"
+        MicMixDisplay.STOPPED -> "Microphone mix stopped"
+    }
+    return "$base \u00B7 $mic"
 }
 
 const val MIC_MIX_LABEL = "Mix in microphone"

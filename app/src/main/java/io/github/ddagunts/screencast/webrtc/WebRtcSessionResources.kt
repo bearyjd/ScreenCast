@@ -30,6 +30,8 @@ internal interface SessionPeer {
     val connectionState: StateFlow<PeerConnection.PeerConnectionState>
     // Non-null once the negotiated codec differs from the requested one.
     val codecMismatch: StateFlow<String?> get() = NO_CODEC_MISMATCH
+    // What the mic mix is really doing (OFF when it was never enabled for this cast).
+    val micMixDisplay: StateFlow<MicMixDisplay> get() = NO_MIC_MIX
     fun build()
     fun addScreenSource(data: Intent, onProjectionStopped: () -> Unit)
     suspend fun createOffer(): String
@@ -39,3 +41,4 @@ internal interface SessionPeer {
 }
 
 private val NO_CODEC_MISMATCH: StateFlow<String?> = MutableStateFlow(null)
+private val NO_MIC_MIX: StateFlow<MicMixDisplay> = MutableStateFlow(MicMixDisplay.OFF)

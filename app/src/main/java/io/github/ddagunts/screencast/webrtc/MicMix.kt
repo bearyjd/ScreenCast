@@ -24,6 +24,13 @@ internal fun interface MicSourceFactory { fun create(sampleRate: Int): MicSource
 
 internal enum class MicMixStatus { IDLE, STARTING, ACTIVE, DENIED, FAILED, STOPPED }
 
+/** Notification view of the controller: ACTIVE only while the mic is recording and not silent. */
+internal fun micMixDisplay(status: MicMixStatus, silent: Boolean): MicMixDisplay = when (status) {
+    MicMixStatus.IDLE, MicMixStatus.STARTING -> MicMixDisplay.STARTING
+    MicMixStatus.ACTIVE -> if (silent) MicMixDisplay.SILENT else MicMixDisplay.ACTIVE
+    MicMixStatus.DENIED, MicMixStatus.FAILED, MicMixStatus.STOPPED -> MicMixDisplay.STOPPED
+}
+
 internal const val MIC_MIX_SAMPLE_RATE = 48_000
 // Ring = 100 ms hard cap. Drift policy: the mic and the ADM run on independent clocks. Mic faster than
 // playback -> ring fills; the consumer trims to a ~30 ms target (dropping the OLDEST samples, a rare
@@ -48,6 +55,8 @@ internal class MicMixController(
     private val log: (String) -> Unit,
     private val spawn: (Runnable) -> Thread = { Thread(it, "mic-mix").apply { isDaemon = true } },
     private val runAsync: (Runnable) -> Unit = { Thread(it, "mic-mix-stop").apply { isDaemon = true }.start() },
+    /** Told every time the user-visible mic state changes (notification truthfulness). Must not block. */
+    private val onDisplay: (MicMixDisplay) -> Unit = {},
 ) {
     private val lock = Any()
     private val ring = MicRingBuffer(RING_SAMPLES)
@@ -55,11 +64,16 @@ internal class MicMixController(
     private var emptyReads = 0
     private var zeroReads = 0
     private var primed = false // audio thread only
+    private val displayLock = Any()
     @Volatile private var state = MicMixStatus.IDLE
+        set(v) { field = v; publishDisplay() }
     @Volatile private var silent = false
+        set(v) { field = v; publishDisplay() }
     private var source: MicSource? = null
     private var thread: Thread? = null
     private val stopRequested = AtomicBoolean(false)
+
+    private fun publishDisplay() = synchronized(displayLock) { runCatching { onDisplay(micMixDisplay(state, silent)) } }
 
     val status: MicMixStatus get() = state
     val isActive: Boolean get() = state == MicMixStatus.ACTIVE
@@ -205,8 +219,9 @@ internal fun wireMicToGuard(controller: PlaybackAudioController, mic: MicMixCont
  */
 internal fun createMicMixController(
     config: WebRtcSessionConfig, micPermissionGranted: () -> Boolean, factory: MicSourceFactory, log: (String) -> Unit,
+    onDisplay: (MicMixDisplay) -> Unit = {},
 ): MicMixController? =
-    if (config.micMixActive) MicMixController(micPermissionGranted, factory, log) else null
+    if (config.micMixActive) MicMixController(micPermissionGranted, factory, log, onDisplay = onDisplay) else null
 
 /**
  * Mixes the mic into the playback PCM libwebrtc is about to encode, only while the controller is

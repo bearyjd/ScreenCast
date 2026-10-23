@@ -76,6 +76,8 @@ open class WebRtcCastSession internal constructor(
     // SET_VOLUME without a transportId. UI hides the slider when isFixed.
     private val _codecMismatch = MutableStateFlow<String?>(null)
     val codecMismatch: StateFlow<String?> = _codecMismatch
+    private val _micMixDisplay = MutableStateFlow(if (sessionConfig.micMixActive) MicMixDisplay.STARTING else MicMixDisplay.OFF)
+    val micMixDisplay: StateFlow<MicMixDisplay> = _micMixDisplay
 
     private val _volume = MutableStateFlow(CastVolume())
     val volume: StateFlow<CastVolume> = _volume
@@ -192,6 +194,7 @@ open class WebRtcCastSession internal constructor(
         // session in Signaling so the UI surfaces "connecting" rather than a
         // misleading Casting state.
         s.launch { p.codecMismatch.collect { _codecMismatch.value = it } }
+        s.launch { p.micMixDisplay.collect { _micMixDisplay.value = it } }
         s.launch {
             p.connectionState.collect { cs ->
                 when (cs.name) {

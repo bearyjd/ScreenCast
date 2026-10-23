@@ -82,6 +82,8 @@ internal class WebRtcPeer(
 
     private val _codecMismatch = MutableStateFlow<String?>(null)
     override val codecMismatch: StateFlow<String?> = _codecMismatch
+    private val _micMixDisplay = MutableStateFlow(MicMixDisplay.OFF)
+    override val micMixDisplay: StateFlow<MicMixDisplay> = _micMixDisplay
     private val mismatchReporter = CodecMismatchReporter(
         requested = config.videoCodecPreference,
         warn = { logW(it) },
@@ -159,8 +161,10 @@ internal class WebRtcPeer(
                 },
                 factory = { rate -> AndroidMicSource.create(rate) },
                 log = { logW(it) },
+                onDisplay = { _micMixDisplay.value = it },
             )
             micMix = mixer
+            if (mixer != null) _micMixDisplay.value = MicMixDisplay.STARTING
             if (mixer != null) wireMicToGuard(controller, mixer) // guard trip -> mic stopped (off the audio thread)
             builder.setAudioBufferCallback(
                 if (mixer == null) meter
