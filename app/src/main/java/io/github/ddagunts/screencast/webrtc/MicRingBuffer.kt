@@ -42,5 +42,11 @@ internal class MicRingBuffer(val capacity: Int) {
         n
     }
 
+    /** Drops the OLDEST samples until at most [target] remain (counted in [droppedSamples]). */
+    fun trimTo(target: Int) = synchronized(lock) {
+        val excess = size - target.coerceAtLeast(0)
+        if (excess > 0) { head = (head + excess) % capacity; size -= excess; dropped += excess }
+    }
+
     fun clear() = synchronized(lock) { head = 0; size = 0 }
 }

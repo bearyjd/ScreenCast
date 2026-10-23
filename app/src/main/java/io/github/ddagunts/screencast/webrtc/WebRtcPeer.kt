@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -160,6 +161,7 @@ internal class WebRtcPeer(
                 log = { logW(it) },
             )
             micMix = mixer
+            if (mixer != null) wireMicToGuard(controller, mixer) // guard trip -> mic stopped (off the audio thread)
             builder.setAudioBufferCallback(
                 if (mixer == null) meter
                 else MicMixBufferCallback(meter, mixer, enabled = controller::meterEnabled, log = { logW(it) }),
@@ -262,9 +264,9 @@ internal class WebRtcPeer(
             val aTrack = f.createAudioTrack(WEBRTC_AUDIO_TRACK_ID, aSource)
             audioTrack = aTrack
             pc.addTrack(aTrack, webRtcStreamIds(WebRtcTrackKind.AUDIO))
-            // Only now, with a real playback audio track, does the opt-in mic reader start.
-            // Failure/denial degrades to playback-only inside the controller; it never throws.
-            micMix?.start()
+            // The opt-in mic reader starts when the connection reaches CONNECTED (see startMicOnConnect),
+            // not here, so signaling time and a never-connected cast never record the microphone.
+            startMicOnConnect()
         }
     }
 
@@ -328,6 +330,16 @@ internal class WebRtcPeer(
     private class CapabilityCodec(val capability: RtpCapabilities.CodecCapability) : CodecLike {
         override val mimeType: String get() = capability.mimeType
         override val parameters: Map<String, String> get() = capability.parameters
+    }
+
+    // Failure/denial degrades to playback-only inside the controller; start() never throws and is
+    // idempotent (a reconnect re-enters CONNECTED harmlessly; a stopped controller refuses to start).
+    private fun startMicOnConnect() {
+        val mic = micMix ?: return
+        samplerScope.launch {
+            _connectionState.first { it == PeerConnection.PeerConnectionState.CONNECTED }
+            mic.start()
+        }
     }
 
     // Runs while CONNECTED; collectLatest cancels the loop on any other state.
