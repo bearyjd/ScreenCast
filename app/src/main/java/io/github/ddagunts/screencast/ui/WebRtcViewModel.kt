@@ -132,7 +132,8 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAudioEnabled(enabled: Boolean) {
         _audioEnabled.value = enabled
-        configStore.audioEnabled = enabled
+        configStore.audioEnabled = enabled // also clears the stored mic mix when audio is turned off
+        if (!enabled) _micMix.value = false
     }
 
     fun startCast(device: CastDevice) {

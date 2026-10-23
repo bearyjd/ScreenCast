@@ -85,14 +85,37 @@ fun audioSettingDescription(micMix: Boolean): String =
     if (micMix) "$AUDIO_DESCRIPTION_BASE Your microphone is also mixed in (see below)."
     else "$AUDIO_DESCRIPTION_BASE The microphone is not used."
 
+// The MICROPHONE foreground service type exists from API 30; below it the mix is forced off.
+const val MIN_MIC_MIX_SDK = 30
+
+fun micMixSwitchVisible(audioRequested: Boolean, sdkInt: Int): Boolean = audioRequested && sdkInt >= MIN_MIC_MIX_SDK
+
+enum class MicMixToggleAction { TURN_OFF, SHOW_CONSENT }
+/** Every off->on toggle goes through the consent dialog, whether or not RECORD_AUDIO is already granted. */
+fun micMixToggleAction(on: Boolean): MicMixToggleAction = if (on) MicMixToggleAction.SHOW_CONSENT else MicMixToggleAction.TURN_OFF
+
+enum class MicMixConsentAction { ENABLE, REQUEST_PERMISSION }
+fun micMixConsentAction(permissionGranted: Boolean): MicMixConsentAction =
+    if (permissionGranted) MicMixConsentAction.ENABLE else MicMixConsentAction.REQUEST_PERMISSION
+
+/** Foreground notification body. Discloses the microphone for as long as the mix is configured on for the cast. */
+fun webRtcNotificationBody(errorMessage: String?, micMixOn: Boolean): String {
+    val base = errorMessage ?: "Tap Stop to end"
+    return if (micMixOn) "$base \u00B7 Microphone is mixed in" else base
+}
+
 const val MIC_MIX_LABEL = "Mix in microphone"
 const val MIC_MIX_EXPLANATION =
-    "Off by default. When on, your voice is added to the cast audio. This uses the microphone: Android shows " +
-        "the microphone indicator while casting. It also picks up room and TV sound, so use headphones or mute " +
-        "the TV to avoid echo. If the microphone is unavailable or blocked, the cast continues with playback " +
-        "audio only."
+    "Off by default. When on, your voice is added to the cast audio and the microphone is recorded during the cast. " +
+        "Android 12 and newer show a microphone indicator while it is in use. The microphone also picks up room " +
+        "sound: if the TV speaker is audible near the phone you will hear echo, so mute the TV or keep the phone " +
+        "away from it. Headphones on the phone do not prevent this. The switch is locked while casting; " +
+        "turn it off before your next cast to stop using the microphone. If the microphone is unavailable or " +
+        "blocked, the cast continues with playback audio only."
 const val MIC_MIX_DIALOG_TITLE = "Allow the microphone for the cast?"
 const val MIC_MIX_DIALOG_BODY =
     "Mixing in the microphone records your voice while you cast and sends it to the TV with the phone's " +
-        "audio. Android will show the microphone indicator. You can turn this off again at any time. " +
-        "Android will now ask for the Microphone permission."
+        "audio. Android 12 and newer show a microphone indicator. Echo is expected if the TV speaker is audible " +
+        "near the phone: mute the TV or keep the phone away from it. Headphones on the phone do not prevent this. " +
+        "This switch is locked during a cast; turn it off before your next cast. " +
+        "If the Microphone permission is not yet allowed, Android will ask for it next."

@@ -38,10 +38,15 @@ import io.github.ddagunts.screencast.webrtc.MIC_MIX_DIALOG_BODY
 import io.github.ddagunts.screencast.webrtc.MIC_MIX_DIALOG_TITLE
 import io.github.ddagunts.screencast.webrtc.MIC_MIX_EXPLANATION
 import io.github.ddagunts.screencast.webrtc.MIC_MIX_LABEL
+import io.github.ddagunts.screencast.webrtc.MicMixConsentAction
+import io.github.ddagunts.screencast.webrtc.MicMixToggleAction
 import io.github.ddagunts.screencast.webrtc.PermissionAction
 import io.github.ddagunts.screencast.webrtc.WebRtcConfigStore
 import io.github.ddagunts.screencast.webrtc.audioNote
 import io.github.ddagunts.screencast.webrtc.audioSettingDescription
+import io.github.ddagunts.screencast.webrtc.micMixConsentAction
+import io.github.ddagunts.screencast.webrtc.micMixSwitchVisible
+import io.github.ddagunts.screencast.webrtc.micMixToggleAction
 import io.github.ddagunts.screencast.webrtc.permissionAction
 import io.github.ddagunts.screencast.webrtc.resolveAudioMode
 
@@ -90,12 +95,12 @@ fun WebRtcAudioSetting(
         Switch(checked = requested, onCheckedChange = null, enabled = enabled)
     }
     Text(
-        audioSettingDescription(micMix && requested),
+        audioSettingDescription(micMix && micMixSwitchVisible(requested, Build.VERSION.SDK_INT)),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     val mode = resolveAudioMode(requested, micGranted, Build.VERSION.SDK_INT)
-    audioNote(mode, micMix)?.let { note ->
+    audioNote(mode, micMix && micMixSwitchVisible(requested, Build.VERSION.SDK_INT))?.let { note ->
         Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
     }
     if (requested && Build.VERSION.SDK_INT >= 29 && !micGranted) {
@@ -115,16 +120,17 @@ fun WebRtcAudioSetting(
             PermissionAction.NONE -> Unit
         }
     }
-    if (requested) {
+    // Hidden below API 30: the MICROPHONE foreground service type does not exist there, so the mix is always off.
+    if (micMixSwitchVisible(requested, Build.VERSION.SDK_INT)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.toggleable(
                 value = micMix, enabled = enabled, role = Role.Switch,
                 onValueChange = { on ->
-                    when {
-                        !on -> onMicMixChange(false)
-                        micGranted -> onMicMixChange(true)
-                        else -> showMicMixDialog = true // explain first; the system prompt comes after confirm
+                    when (micMixToggleAction(on)) {
+                        MicMixToggleAction.TURN_OFF -> onMicMixChange(false)
+                        // Every off->on toggle is explained first, whether or not the permission is already granted.
+                        MicMixToggleAction.SHOW_CONSENT -> showMicMixDialog = true
                     }
                 },
             ),
@@ -153,9 +159,14 @@ fun WebRtcAudioSetting(
             confirmButton = {
                 TextButton(onClick = {
                     showMicMixDialog = false
-                    pendingMicMix = true
-                    launcher.launch(Manifest.permission.RECORD_AUDIO)
-                }) { Text("Continue") }
+                    when (micMixConsentAction(micGranted)) {
+                        MicMixConsentAction.ENABLE -> onMicMixChange(true)
+                        MicMixConsentAction.REQUEST_PERMISSION -> {
+                            pendingMicMix = true
+                            launcher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                }) { Text(if (micGranted) "Turn on" else "Continue") }
             },
             dismissButton = { TextButton(onClick = { showMicMixDialog = false }) { Text("Cancel") } },
         )

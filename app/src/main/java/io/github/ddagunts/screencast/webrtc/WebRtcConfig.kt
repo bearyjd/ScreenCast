@@ -94,7 +94,7 @@ data class WebRtcSessionConfig(
 ) {
     // The microphone is touched only when this is true: the user opted in AND playback audio is active
     // (which implies RECORD_AUDIO is granted and the OS supports playback capture).
-    val micMixActive: Boolean get() = micMix && audioActive
+    val micMixActive: Boolean get() = micMix && audioActive && sdkInt >= MIN_MIC_MIX_SDK
     // Audio will be attempted. It can still fall back to video-only at runtime.
     val audioActive: Boolean get() = resolveAudioMode(audioRequested, recordAudioGranted, sdkInt) == AudioMode.ACTIVE
 }
@@ -135,9 +135,14 @@ class WebRtcConfigStore(context: Context) {
         get() = VideoCodecPreference.fromName(prefs.getString(KEY_VIDEO_CODEC_PREFERENCE, null))
         set(value) { prefs.edit().putString(KEY_VIDEO_CODEC_PREFERENCE, value.name).apply() }
 
+    // Turning playback audio off also clears the mic mix, so turning audio back on later can never
+    // silently re-enable the microphone.
     var audioEnabled: Boolean
         get() = prefs.getBoolean(KEY_AUDIO_PLAYBACK_ENABLED, true)
-        set(value) { prefs.edit().putBoolean(KEY_AUDIO_PLAYBACK_ENABLED, value).apply() }
+        set(value) = prefs.edit {
+            putBoolean(KEY_AUDIO_PLAYBACK_ENABLED, value)
+            if (!value) putBoolean(KEY_MIC_MIX, false)
+        }
 
     var muteWhileCasting: Boolean
         get() = prefs.getBoolean(KEY_MUTE_WHILE_CASTING, false)

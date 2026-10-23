@@ -192,6 +192,7 @@ open class WebRtcForegroundService : Service() {
     private fun finishTerminalSession(finished: WebRtcCastSession) {
         if (session !== finished) return
         liveCast = false
+        micMixOn = false
         try {
             finished.close()
         } catch (e: RuntimeException) {
@@ -212,6 +213,7 @@ open class WebRtcForegroundService : Service() {
         // stop() first: it closes the session synchronously, so cancelling the job
         // afterwards cannot pre-empt the farewell with close().
         liveCast = false
+        micMixOn = false
         try {
             runCatching { session?.stop() }.onFailure { logW("stopCast: $it") }
         } finally {
@@ -235,21 +237,24 @@ open class WebRtcForegroundService : Service() {
     // Returns true when the foreground type includes MICROPHONE (so the mic mix may run). The mic type
     // is requested only for an active opt-in; if the system rejects it (e.g. not allowed from this
     // state) we fall back to today's type and the caller turns the mic mix off.
+    // True while this cast has the microphone mix on (mic FGS type accepted); drives the notification disclosure.
+    @Volatile private var micMixOn = false
+
     private fun startForegroundNow(deviceName: String, cfg: io.github.ddagunts.screencast.webrtc.WebRtcSessionConfig): Boolean {
         val micType = io.github.ddagunts.screencast.webrtc.foregroundServiceType(
             cfg.micMixActive, cfg.recordAudioGranted, Build.VERSION.SDK_INT,
         )
         val base = io.github.ddagunts.screencast.webrtc.foregroundServiceType(false, false, Build.VERSION.SDK_INT)
-        if (micType != base) {
-            try {
-                ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(deviceName), micType)
-                return true
-            } catch (e: RuntimeException) { // SecurityException / ForegroundServiceStartNotAllowedException
-                logW("webrtc: microphone foreground type refused ($e); mic mix off, playback audio only")
-            }
-        }
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(deviceName), base)
-        return false
+        val ok = io.github.ddagunts.screencast.webrtc.startForegroundWithMicFallback(
+            micType, base,
+            start = { type ->
+                micMixOn = type != base // the notification posted with the mic type already discloses the microphone
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(deviceName), type)
+            },
+            log = { logW(it) },
+        )
+        micMixOn = ok
+        return ok
     }
 
     private fun refreshNotification() {
@@ -268,7 +273,7 @@ open class WebRtcForegroundService : Service() {
             "ERROR" -> "WebRTC error"
             else -> "WebRTC → $deviceName"
         }
-        val body = snap?.errorMessage ?: "Tap Stop to end"
+        val body = io.github.ddagunts.screencast.webrtc.webRtcNotificationBody(snap?.errorMessage, micMixOn)
         val stopIntent = Intent(this, WebRtcForegroundService::class.java).setAction(ACTION_STOP)
         val stopPi = PendingIntent.getService(
             this, 0, stopIntent,

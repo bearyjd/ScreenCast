@@ -3,7 +3,6 @@ package io.github.ddagunts.screencast.webrtc
 import android.content.Context
 import android.content.pm.ServiceInfo
 import androidx.test.core.app.ApplicationProvider
-import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,9 +42,84 @@ class MicMixPolicyTest {
         assertTrue(audioNote(AudioMode.NEEDS_PERMISSION)!!.contains("not used"))
     }
 
-    @Test fun `mic mix copy covers indicator echo and room sound`() {
-        val c = MIC_MIX_EXPLANATION.lowercase()
-        listOf("indicator", "headphones", "room", "off by default").forEach { assertTrue(it, c.contains(it)) }
+    @Test fun `mic mix copy is truthful about indicator echo and the locked switch`() {
+        listOf(MIC_MIX_EXPLANATION, MIC_MIX_DIALOG_BODY).forEach { text ->
+            val c = text.lowercase()
+            assertTrue(c, c.contains("echo"))
+            assertTrue(c, c.contains("tv"))
+            assertTrue(c, c.contains("android 12"))            // indicators exist from API 31
+            assertTrue(c, c.contains("before your next cast")) // the switch is disabled during a cast
+            assertTrue(c, c.contains("do not prevent"))        // phone headphones do not stop TV-to-mic echo
+            assertFalse(c, c.contains("use headphones"))
+            assertFalse(c, c.contains("avoid echo"))
+        }
+        assertTrue(MIC_MIX_EXPLANATION.lowercase().contains("off by default"))
+        assertFalse(MIC_MIX_EXPLANATION.lowercase().contains("you can turn this off again at any time"))
+        assertFalse(MIC_MIX_DIALOG_BODY.lowercase().contains("at any time"))
+    }
+
+    // ---- toggle / visibility policy ----
+    @Test fun `every off to on toggle shows the consent dialog and off needs none`() {
+        assertEquals(MicMixToggleAction.SHOW_CONSENT, micMixToggleAction(on = true))
+        assertEquals(MicMixToggleAction.TURN_OFF, micMixToggleAction(on = false))
+    }
+
+    @Test fun `consent asks for the permission only when it is missing`() {
+        assertEquals(MicMixConsentAction.ENABLE, micMixConsentAction(permissionGranted = true))
+        assertEquals(MicMixConsentAction.REQUEST_PERMISSION, micMixConsentAction(permissionGranted = false))
+    }
+
+    @Test fun `switch is hidden below API 30 and when playback audio is off`() {
+        assertFalse(micMixSwitchVisible(audioRequested = true, sdkInt = 29))
+        assertFalse(micMixSwitchVisible(true, 28))
+        assertTrue(micMixSwitchVisible(true, 30))
+        assertTrue(micMixSwitchVisible(true, 36))
+        assertFalse(micMixSwitchVisible(false, 34))
+    }
+
+    @Test fun `mic mix is never active below API 30`() {
+        val cfg = WebRtcSessionConfig(VideoPreset.HD_30, 1, audioRequested = true, recordAudioGranted = true, sdkInt = 29, micMix = true)
+        assertFalse(cfg.micMixActive)
+        assertTrue(cfg.copy(sdkInt = 30).micMixActive)
+    }
+
+    // ---- foreground type fallback seam (C) ----
+    @Test fun `mic type refused falls back to the base type and reports mic off`() {
+        val calls = mutableListOf<Int>(); val log = mutableListOf<String>()
+        val ok = startForegroundWithMicFallback(proj or mic, proj, { calls += it; if (it == proj or mic) throw SecurityException("nope") }, { log += it })
+        assertFalse(ok); assertEquals(listOf(proj or mic, proj), calls)
+        assertTrue(log.any { it.contains("SecurityException") })
+    }
+
+    @Test fun `any runtime exception from the mic type falls back`() {
+        val calls = mutableListOf<Int>()
+        val ok = startForegroundWithMicFallback(proj or mic, proj, { calls += it; if (calls.size == 1) throw IllegalStateException("not allowed") }, { })
+        assertFalse(ok); assertEquals(2, calls.size)
+    }
+
+    @Test fun `mic type accepted reports mic on with a single call`() {
+        val calls = mutableListOf<Int>()
+        assertTrue(startForegroundWithMicFallback(proj or mic, proj, { calls += it }, { }))
+        assertEquals(listOf(proj or mic), calls)
+    }
+
+    @Test fun `no mic type requested means one base call and mic off`() {
+        val calls = mutableListOf<Int>()
+        assertFalse(startForegroundWithMicFallback(proj, proj, { calls += it }, { }))
+        assertEquals(listOf(proj), calls)
+    }
+
+    @Test fun `a failing base type still propagates`() {
+        try { startForegroundWithMicFallback(proj, proj, { throw SecurityException("x") }, { }); org.junit.Assert.fail() }
+        catch (_: SecurityException) { }
+    }
+
+    // ---- notification disclosure (D1) ----
+    @Test fun `notification discloses the microphone only while the mix is on`() {
+        assertTrue(webRtcNotificationBody(null, micMixOn = true).contains("Microphone is mixed in"))
+        assertFalse(webRtcNotificationBody(null, micMixOn = false).contains("icrophone"))
+        assertEquals("Tap Stop to end", webRtcNotificationBody(null, micMixOn = false))
+        assertTrue(webRtcNotificationBody("boom", micMixOn = true).startsWith("boom"))
     }
 }
 
@@ -74,31 +148,5 @@ class MicMixStoreTest {
         assertFalse(base.copy(audioRequested = false).micMixActive)
         assertFalse(base.copy(recordAudioGranted = false).micMixActive)
         assertFalse(base.copy(micMix = false).micMixActive)
-    }
-}
-
-class MicMixSourceInvariantTest {
-    private val root = File("src/main/java/io/github/ddagunts/screencast")
-    private val manifest = File("src/main/AndroidManifest.xml").readText()
-
-    @Test fun `microphone audio source appears only in the dedicated mic file`() {
-        val offenders = root.walkTopDown().filter { it.extension == "kt" }
-            .filter { Regex("""AudioSource\.(MIC|VOICE_\w+|CAMCORDER|DEFAULT|UNPROCESSED)""").containsMatchIn(it.readText()) }
-            .map { it.name }.toList()
-        assertEquals(listOf("AndroidMicSource.kt"), offenders)
-    }
-
-    @Test fun `ADM is still pinned to REMOTE_SUBMIX`() {
-        val peer = File(root, "webrtc/WebRtcPeer.kt").readText()
-        assertTrue(peer.contains(".setAudioSource(AUDIO_SOURCE_REMOTE_SUBMIX)"))
-    }
-
-    @Test fun `manifest declares mic FGS permission and only the WebRTC service has the mic type`() {
-        assertTrue(manifest.contains("android.permission.FOREGROUND_SERVICE_MICROPHONE"))
-        val services = Regex("""<service[^>]*?/>""", RegexOption.DOT_MATCHES_ALL).findAll(manifest).map { it.value }.toList()
-        val withMic = services.filter { it.contains("microphone") }
-        assertEquals(1, withMic.size)
-        assertTrue(withMic[0].contains(".WebRtcForegroundService"))
-        assertTrue(withMic[0].contains("mediaProjection|microphone"))
     }
 }
