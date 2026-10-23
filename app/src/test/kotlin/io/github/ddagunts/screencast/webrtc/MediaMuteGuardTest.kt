@@ -1,148 +1,221 @@
 package io.github.ddagunts.screencast.webrtc
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-private class FakeVolume(var volume: Int) : MediaVolumeControl {
-    val sets = mutableListOf<Int>()
-    var failGet: Throwable? = null
-    var failSet: Throwable? = null
-    override fun getMediaVolume(): Int { failGet?.let { throw it }; return volume }
-    override fun setMediaVolume(level: Int) { failSet?.let { throw it }; sets += level; volume = level }
+internal class FakeVolume(var muted: Boolean = false, var fixed: Boolean = false, var level: Int = 9) : MediaVolumeControl {
+    val events = mutableListOf<String>()
+    var failMute: Throwable? = null
+    var failUnmute: Throwable? = null
+    var failIsMuted: Throwable? = null
+    var muteIgnored = false
+    var onMute: () -> Unit = {}
+    override fun isVolumeFixed() = fixed
+    override fun isMuted(): Boolean { failIsMuted?.let { throw it }; return muted }
+    override fun mute() { failMute?.let { throw it }; events += "mute"; onMute(); if (!muteIgnored) muted = true }
+    override fun unmute() { failUnmute?.let { throw it }; events += "unmute"; muted = false }
 }
 
-private class FakeStore(var marker: MuteMarker? = null) : MuteMarkerStore {
+internal class FakeStore(var marker: MuteMarker? = null) : MuteMarkerStore {
     var failWrite: Throwable? = null
+    var failClear: Throwable? = null
     override fun read(): MuteMarker? = marker
     override fun write(marker: MuteMarker) { failWrite?.let { throw it }; this.marker = marker }
-    override fun clear() { marker = null }
+    override fun clear() { failClear?.let { throw it }; marker = null }
 }
 
 class MediaMuteGuardTest {
-    private val vol = FakeVolume(9)
+    private val vol = FakeVolume()
     private val store = FakeStore()
     private val logs = mutableListOf<String>()
-    private fun guard() =
-        MediaMuteGuard(vol, store, clock = { 1234L }, log = { logs += it })
+    private fun guard() = MediaMuteGuard(vol, store, clock = { 1234L }, log = { logs += it })
 
-    @Test fun `mute records marker before lowering and restore puts volume back`() {
+    @Test fun `mute writes marker then mutes and restore unmutes and clears`() {
         val g = guard()
         g.mute("s1")
-        assertEquals(0, vol.volume)
-        assertEquals(MuteMarker(9, "s1", 1234L), store.marker)
+        assertTrue(vol.muted)
+        assertEquals(MuteMarker("s1", 1234L), store.marker)
         g.restore()
-        assertEquals(9, vol.volume)
+        assertFalse(vol.muted)
         assertNull(store.marker)
     }
 
-    @Test fun `marker is persisted before volume is changed`() {
-        var markerAtSet: MuteMarker? = null
-        val v = object : MediaVolumeControl {
-            override fun getMediaVolume() = 5
-            override fun setMediaVolume(level: Int) { markerAtSet = store.marker }
-        }
-        MediaMuteGuard(v, store, { 1L }, {}).mute("s")
-        assertNotNull(markerAtSet)
+    @Test fun `marker is persisted before the stream is muted`() {
+        var markerAtMute: MuteMarker? = null
+        vol.onMute = { markerAtMute = store.marker }
+        guard().mute("s")
+        assertNotNull(markerAtMute)
     }
 
-    @Test fun `user changed volume during cast is not clobbered`() {
+    @Test fun `already muted stream is left alone and no marker is written`() {
+        vol.muted = true
         val g = guard()
         g.mute("s1")
-        vol.volume = 4
+        assertTrue(vol.events.isEmpty())
+        assertNull(store.marker)
         g.restore()
-        assertEquals(4, vol.volume)
+        assertTrue(vol.muted)
+    }
+
+    @Test fun `user unmuting mid-cast is not undone`() {
+        val g = guard()
+        g.mute("s1")
+        vol.muted = false
+        g.restore()
+        assertEquals(listOf("mute"), vol.events)
+        assertFalse(vol.muted)
         assertNull(store.marker)
     }
 
-    @Test fun `crash recovery restores from marker with a fresh guard`() {
+    @Test fun `user volume zero without mute flag is never touched`() {
+        vol.level = 0
+        val g = guard()
+        g.mute("s1") // not muted, so we mute and mark; restore then unmutes only the mute flag
+        g.restore()
+        assertEquals(0, vol.level)
+        assertFalse(vol.muted)
+    }
+
+    @Test fun `fixed volume device skips the feature`() {
+        vol.fixed = true
         guard().mute("s1")
-        val fresh = guard()
-        fresh.restore()
-        assertEquals(9, vol.volume)
+        assertTrue(vol.events.isEmpty())
         assertNull(store.marker)
+        assertTrue(logs.any { it.contains("fixed") })
+    }
+
+    @Test fun `stale marker with muted stream and idle unmutes and clears`() {
+        store.marker = MuteMarker("old", 1L)
+        vol.muted = true
+        guard().recover { false }
+        assertFalse(vol.muted)
+        assertNull(store.marker)
+    }
+
+    @Test fun `stale marker with stream not muted clears only`() {
+        store.marker = MuteMarker("old", 1L)
+        guard().recover { false }
+        assertTrue(vol.events.isEmpty())
+        assertNull(store.marker)
+    }
+
+    @Test fun `recover skips while a cast is active`() {
+        store.marker = MuteMarker("live", 1L)
+        vol.muted = true
+        guard().recover { true }
+        assertTrue(vol.muted)
+        assertNotNull(store.marker)
+    }
+
+    @Test fun `recover re-checks cast state under the lock right before unmuting`() {
+        store.marker = MuteMarker("s", 1L)
+        vol.muted = true
+        val answers = ArrayDeque(listOf(true))
+        guard().recover { answers.removeFirstOrNull() ?: false }
+        assertTrue("single check must be honoured", vol.muted)
     }
 
     @Test fun `no marker restore is a no-op`() {
+        vol.muted = true // user's own mute
         guard().restore()
-        assertTrue(vol.sets.isEmpty())
+        assertTrue(vol.events.isEmpty())
+        assertTrue(vol.muted)
     }
 
     @Test fun `restore is idempotent`() {
         val g = guard()
         g.mute("s1")
         g.restore()
-        vol.volume = 0 // user mutes manually afterwards
+        vol.muted = true // user mutes manually afterwards
         g.restore()
-        assertEquals(0, vol.volume)
-        assertEquals(listOf(0, 9), vol.sets)
+        assertTrue(vol.muted)
+        assertEquals(listOf("mute", "unmute"), vol.events)
     }
 
-    @Test fun `already silent media volume writes no marker`() {
-        vol.volume = 0
-        guard().mute("s1")
+    @Test fun `mute not wanted any more by the time the lock is held does nothing`() {
+        guard().mute("s1") { false }
+        assertTrue(vol.events.isEmpty())
         assertNull(store.marker)
-        assertTrue(vol.sets.isEmpty())
     }
 
-    @Test fun `stale marker is restored before a new mute so 0 is never recorded as original`() {
-        guard().mute("old") // crash: volume 0, marker 9
-        val g = guard()
-        g.mute("new")
-        assertEquals(MuteMarker(9, "new", 1234L), store.marker)
-        g.restore()
-        assertEquals(9, vol.volume)
-    }
-
-    @Test fun `marker write failure means volume is not touched`() {
+    @Test fun `marker write failure aborts the mute`() {
         store.failWrite = SecurityException("no")
         guard().mute("s1")
-        assertEquals(9, vol.volume)
+        assertFalse(vol.muted)
+        assertTrue(vol.events.isEmpty())
         assertTrue(logs.any { it.contains("marker") })
     }
 
-    @Test fun `set volume failure on mute clears marker and does not throw`() {
-        vol.failSet = SecurityException("denied")
+    @Test fun `mute failure clears the marker and leaves volume state consistent`() {
+        vol.failMute = SecurityException("denied")
         guard().mute("s1")
         assertNull(store.marker)
-        assertEquals(9, vol.volume)
+        assertFalse(vol.muted)
         assertTrue(logs.isNotEmpty())
     }
 
-    @Test fun `set volume failure on restore keeps marker for retry and does not throw`() {
+    @Test fun `mute that did not take effect clears the marker`() {
+        vol.muteIgnored = true
+        guard().mute("s1")
+        assertNull(store.marker)
+        assertFalse(vol.muted)
+    }
+
+    @Test fun `unmute failure keeps marker for retry`() {
         val g = guard()
         g.mute("s1")
-        vol.failSet = SecurityException("denied")
+        vol.failUnmute = SecurityException("denied")
         g.restore()
+        assertTrue(vol.muted)
         assertNotNull(store.marker)
-        vol.failSet = null
+        vol.failUnmute = null
         g.restore()
-        assertEquals(9, vol.volume)
+        assertFalse(vol.muted)
         assertNull(store.marker)
     }
 
-    @Test fun `get volume failure never throws`() {
-        vol.failGet = IllegalStateException("boom")
+    @Test fun `isMuted failure never throws and keeps marker`() {
         val g = guard()
         g.mute("s1")
+        vol.failIsMuted = IllegalStateException("boom")
         g.restore()
+        assertTrue(vol.muted)
+        assertNotNull(store.marker)
         assertTrue(logs.isNotEmpty())
     }
 
-    @Test fun `corrupt negative marker is cleared without touching volume`() {
-        store.marker = MuteMarker(-1, "x", 0L)
-        guard().restore()
+    @Test fun `marker clear failure after unmute is retried harmlessly`() {
+        val g = guard()
+        g.mute("s1")
+        store.failClear = RuntimeException("disk")
+        g.restore()
+        assertFalse(vol.muted)
+        assertNotNull(store.marker)
+        store.failClear = null
+        g.restore() // stream no longer muted: clear only, no second unmute
         assertNull(store.marker)
-        assertTrue(vol.sets.isEmpty())
+        assertEquals(listOf("mute", "unmute"), vol.events)
     }
 
-    @Test fun `recoverIfIdle skips while a cast is active`() {
-        guard().mute("s1")
-        guard().recoverIfIdle(castActive = true)
-        assertEquals(0, vol.volume)
-        guard().recoverIfIdle(castActive = false)
-        assertEquals(9, vol.volume)
+    @Test fun `restore cannot interleave with an in-flight mute`() {
+        val inMute = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        vol.onMute = { inMute.countDown(); release.await(5, TimeUnit.SECONDS) }
+        val g = guard()
+        val a = Thread { g.mute("s1") }.also { it.start() }
+        assertTrue(inMute.await(5, TimeUnit.SECONDS))
+        val b = Thread { g.restore() }.also { it.start() }
+        Thread.sleep(100) // b must be parked on the lock, not racing past an unfinished mute
+        release.countDown()
+        a.join(5000); b.join(5000)
+        assertFalse("restore must see the completed mute and undo it", vol.muted)
+        assertNull(store.marker)
+        assertEquals(listOf("mute", "unmute"), vol.events)
     }
 }

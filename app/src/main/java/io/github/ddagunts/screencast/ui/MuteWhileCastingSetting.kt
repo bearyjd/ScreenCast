@@ -10,7 +10,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 
-// Opt-in: silence the phone's media volume for the duration of a WebRTC cast.
+// Opt-in: mute the phone's media stream for the duration of a WebRTC cast.
 @Composable
 fun MuteWhileCastingSetting(checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     Row(
@@ -21,7 +21,7 @@ fun MuteWhileCastingSetting(checked: Boolean, enabled: Boolean, onChange: (Boole
         Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
     Text(
-        "Lowers this phone's media volume to 0 during a cast and restores it afterwards. TV volume is not affected. If you change the volume yourself mid-cast, it is left as you set it.",
+        "Mutes this phone's media output while casting and unmutes it when the cast stops. If you unmute or change the volume yourself during the cast, it is left as you set it.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

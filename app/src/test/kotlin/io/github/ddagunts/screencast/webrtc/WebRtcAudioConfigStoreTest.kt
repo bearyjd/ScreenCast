@@ -77,9 +77,30 @@ class MuteWhileCastingStoreTest {
     @Test fun `prefs marker store round trips and clears`() {
         val s = PrefsMuteMarkerStore(ctx)
         assertEquals(null, s.read())
-        s.write(MuteMarker(7, "abc", 99L))
-        assertEquals(MuteMarker(7, "abc", 99L), PrefsMuteMarkerStore(ctx).read())
+        s.write(MuteMarker("abc", 99L))
+        assertEquals(MuteMarker("abc", 99L), PrefsMuteMarkerStore(ctx).read())
         s.clear()
         assertEquals(null, PrefsMuteMarkerStore(ctx).read())
+    }
+
+    @Test fun `marker store write and clear use synchronous commit never apply`() {
+        val calls = mutableListOf<String>()
+        val real = ctx.getSharedPreferences("commit_probe", Context.MODE_PRIVATE)
+        val prefs = object : android.content.SharedPreferences by real {
+            override fun edit(): android.content.SharedPreferences.Editor {
+                val e = real.edit()
+                return object : android.content.SharedPreferences.Editor by e {
+                    override fun apply() { calls += "apply"; e.apply() }
+                    override fun commit(): Boolean { calls += "commit"; return e.commit() }
+                    override fun putString(k: String?, v: String?) = also { e.putString(k, v) }
+                    override fun putLong(k: String?, v: Long) = also { e.putLong(k, v) }
+                    override fun clear() = also { e.clear() }
+                }
+            }
+        }
+        val s = PrefsMuteMarkerStore(prefs)
+        s.write(MuteMarker("abc", 1L))
+        s.clear()
+        assertEquals(listOf("commit", "commit"), calls)
     }
 }

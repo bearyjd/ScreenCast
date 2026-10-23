@@ -18,6 +18,7 @@ import io.github.ddagunts.screencast.util.logE
 import io.github.ddagunts.screencast.util.logI
 import io.github.ddagunts.screencast.util.logW
 import io.github.ddagunts.screencast.webrtc.MediaMuteGuard
+import io.github.ddagunts.screencast.webrtc.MediaMuteGuards
 import io.github.ddagunts.screencast.webrtc.WebRtcCastSession
 import io.github.ddagunts.screencast.webrtc.WebRtcState
 import kotlinx.coroutines.CancellationException
@@ -43,9 +44,9 @@ open class WebRtcForegroundService : Service() {
     private val scope by lazy { CoroutineScope(workerDispatcher + SupervisorJob()) }
     internal open fun createSession(device: CastDevice, config: io.github.ddagunts.screencast.webrtc.WebRtcSessionConfig) =
         WebRtcCastSession(this, device, config)
-    internal open fun createMuteGuard(): MediaMuteGuard = MediaMuteGuard.forContext(this)
+    internal open fun createMuteGuard(): MediaMuteGuard = MediaMuteGuards.get(this)
     private val muteGuard by lazy { createMuteGuard() }
-    private var session: WebRtcCastSession? = null
+    @Volatile private var session: WebRtcCastSession? = null
     private var sessionJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -54,8 +55,10 @@ open class WebRtcForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        // Service died mid-cast last time: undo the mute (no-op without a marker).
-        muteGuard.recoverIfIdle(castActive = session != null)
+        // A previous process may have died while we had the phone muted. This service has no session
+        // yet, but a ViewModel-triggered recovery must not unmute a live cast, so liveCast is re-checked
+        // under the guard lock. Off the main thread: it reads/commits SharedPreferences.
+        scope.launch { muteGuard.recover { liveCast } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -123,7 +126,7 @@ open class WebRtcForegroundService : Service() {
         val cfg = io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).snapshot()
         val s = createSession(device, cfg)
         session = s
-        if (cfg.muteWhileCasting) muteGuard.mute(java.util.UUID.randomUUID().toString())
+        liveCast = true
         sessionJob = scope.launch {
             // Observe state and mirror to the global flow so the UI can see it.
             launch {
@@ -140,6 +143,11 @@ open class WebRtcForegroundService : Service() {
                         is WebRtcState.Error -> SessionSnapshot(device, "ERROR", st.message, volume = currentVol)
                     }
                     refreshNotification()
+                    // Mute only once the cast is really up, so a failed connect never silences the phone.
+                    // stillWanted runs under the guard lock: a stop that already ran cannot be followed by a mute.
+                    if (st is WebRtcState.Casting && cfg.muteWhileCasting) {
+                        muteGuard.mute(java.util.UUID.randomUUID().toString()) { liveCast && session === s }
+                    }
                     if (st is WebRtcState.Idle || st is WebRtcState.Error) {
                         finishTerminalSession(s)
                     }
@@ -177,8 +185,14 @@ open class WebRtcForegroundService : Service() {
 
     private fun finishTerminalSession(finished: WebRtcCastSession) {
         if (session !== finished) return
-        finished.close()
-        muteGuard.restore()
+        liveCast = false
+        try {
+            finished.close()
+        } catch (e: RuntimeException) {
+            logW("finishTerminalSession: close failed: $e")
+        } finally {
+            muteGuard.restore()
+        }
         session = null
         sessionJob?.cancel()
         sessionJob = null
@@ -189,8 +203,12 @@ open class WebRtcForegroundService : Service() {
     private fun stopCast() {
         // stop() first: it closes the session synchronously, so cancelling the job
         // afterwards cannot pre-empt the farewell with close().
-        runCatching { session?.stop() }.onFailure { logW("stopCast: $it") }
-        muteGuard.restore()
+        liveCast = false
+        try {
+            runCatching { session?.stop() }.onFailure { logW("stopCast: $it") }
+        } finally {
+            muteGuard.restore()
+        }
         sessionJob?.cancel()
         sessionJob = null
         session = null
@@ -291,6 +309,8 @@ open class WebRtcForegroundService : Service() {
     )
 
     companion object {
+        // True from session creation until stop/terminal; read by mute recovery (any thread).
+        @Volatile internal var liveCast = false
         const val ACTION_START = "io.github.ddagunts.screencast.webrtc.START"
         const val ACTION_STOP = "io.github.ddagunts.screencast.webrtc.STOP"
         const val ACTION_SET_VOLUME = "io.github.ddagunts.screencast.webrtc.SET_VOLUME"

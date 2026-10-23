@@ -1,35 +1,45 @@
 # Mute phone while casting - TDD evidence
 
-Setting `muteWhileCasting` (default OFF), WebRTC mode only. STREAM_MUSIC volume only; no ringer/DND.
+Setting `muteWhileCasting` (default OFF), WebRTC mode only. STREAM_MUSIC only; no ringer/DND.
 
-## RED
-Tests `MediaMuteGuardTest` (14) and `MuteWhileCastingStoreTest` (3) written first; test compile failed
-(`Unresolved reference MediaVolumeControl / MuteMarker / MuteMarkerStore / PrefsMuteMarkerStore`).
+## Mechanism
+Android keeps a separate STREAM_MUSIC volume per output device, so "set 0 / restore number" can strand
+the speaker muted, restore onto the wrong device, or undo a deliberate mute. Instead:
+- mute: `adjustStreamVolume(STREAM_MUSIC, ADJUST_MUTE, 0)`; restore: `ADJUST_UNMUTE` + `FLAG_SHOW_UI`,
+  and only if `isStreamMute(STREAM_MUSIC)` is still true.
+- Already muted at cast start: nothing done, no marker (the user's mute stays). `isVolumeFixed`: skipped (logged).
+- Marker (sessionId, timestamp) is written with `commit()` before muting and cleared with `commit()`;
+  a failed marker write aborts the mute. A marker with no muted stream is just cleared.
+- One process-wide `MediaMuteGuards.get(ctx)`; every public method is synchronized on one lock.
+- Mute happens when the session reaches Casting (a failed connect never silences the phone), with a
+  `stillWanted` check under the lock so a stop that raced ahead cannot be followed by a mute.
+- Recovery (`recover { liveCast }`, cast state re-checked under the lock before unmuting) runs from the
+  service `onCreate` and the ViewModel init, off the main thread. There is no Application subclass.
 
-## GREEN
-`MediaMuteGuard` + `PrefsMuteMarkerStore` + `AudioManagerVolume` (webrtc/MediaMuteGuard.kt), pref in
-`WebRtcConfigStore`, VM/UI row, service wiring. Full suite: 448 tests, 0 failures.
-`testDebugUnitTest assembleDebug lintDebug`: BUILD SUCCESSFUL, lint 0 errors.
+## RED / GREEN (fix round)
+RED: tests rewritten first; test compile failed (`isVolumeFixed`/`isMuted` override nothing, `recover`,
+`MuteMarker(sessionId, ts)` unresolved). GREEN: 462 unit tests, 0 failures. Removing the guard lock
+(fresh lock per call) fails the concurrency test.
 
-Covered: mute+restore, marker written before volume change, user-changed volume not clobbered, crash recovery
-with fresh guard, no marker no-op, idempotent restore, already-silent writes no marker, stale marker restored
-before new mute, marker-write / set / get failures logged and never thrown, corrupt marker discarded,
-recoverIfIdle skips while casting, pref default/persistence, marker store round trip.
+## Verified by unit tests
+Guard: mute/restore, marker-before-mute, already-muted no-op, user unmuted mid-cast untouched, volume 0
+without mute flag untouched, fixed volume skipped, stale marker + muted + idle -> unmute, stale marker +
+not muted -> clear only, recover skipped while live, unmute/isMuted/clear/mute failures leave marker and
+state consistent, ignored mute clears marker, lock prevents mute/restore interleaving.
+Store: commit (never apply) for write and clear.
+Service wiring (Robolectric, `WebRtcServiceMuteWiringTest`): setting on -> mute at Casting only; setting
+off -> never touched; stopCast -> restore; terminal error -> restore; `close()` throwing -> restore still
+runs; late CONNECTED after stop -> not left muted; onCreate -> stale mute recovered.
 
-## Wiring
-Service: mute after session creation if snapshot.muteWhileCasting; restore in stopCast and
-finishTerminalSession (ERROR/Idle); recoverIfIdle in service onCreate; also in WebRtcViewModel init.
+## Device-only checks (not verifiable here)
+1. FIRST: cast with the phone muted via ADJUST_MUTE and confirm cast audio is STILL AUDIBLE ON THE TV.
+   Playback capture may or may not be affected by a muted stream; if it is, this setting must be reworded
+   or removed.
+2. Speaker, wired and Bluetooth outputs: mute applies, unmute restores, switching output mid-cast is sane.
+3. Unmute with the volume key mid-cast, then stop: stays unmuted. Mute manually before casting: stays muted.
+4. Force-stop mid-cast, relaunch: phone is unmuted.
+5. GrapheneOS with DND on; setting off never touches audio.
 
-## Residual risks
-- Service wiring itself has no unit test (no existing service harness for AudioManager); covered by guard tests only.
-- If the user manually sets volume to exactly 0 mid-cast, it is indistinguishable and gets restored.
-- Android may show volume UI / block setStreamVolume under DND on some devices (SecurityException is logged, cast continues).
-- Marker is only recovered when the app or service next starts; a crashed process leaves the phone muted until then.
-- Hardware volume keys during cast change the volume; not intercepted.
-
-## Device checks needed
-1. Enable setting, cast: phone media volume drops to 0, TV audio unaffected; stop: original restored.
-2. Change volume mid-cast, stop: volume stays as set.
-3. Force-stop app mid-cast, relaunch app: volume restored.
-4. Setting off: volume never touched. Ringer/DND unchanged throughout.
-5. Test on GrapheneOS with DND on.
+## Known limits
+- `restore()` on stop runs on the calling thread (small SharedPreferences commit).
+- Hardware volume keys are not intercepted.
