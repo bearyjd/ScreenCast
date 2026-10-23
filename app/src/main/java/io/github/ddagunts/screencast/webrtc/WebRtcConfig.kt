@@ -22,6 +22,25 @@ const val WEBRTC_NAMESPACE = "urn:x-cast:io.github.ddagunts.screencast.webrtc"
 const val WEBRTC_AUDIO_SAMPLE_RATE = 48_000
 const val WEBRTC_AUDIO_CHANNELS = 2
 
+// msid stream ids and track ids. libwebrtc only lip-syncs (shared sync group)
+// audio and video that share a stream id. Sharing is DEFAULT-OFF until the
+// attended cast-sim A/B shows the audio_vs_video jitter-buffer delta shrinks and
+// audio stays smooth (see tools/cast-sim/README.md, "A/B: shared stream id").
+// The receiver merges tracks into one MediaStream itself and ignores
+// evt.streams, so this id is cosmetic to it.
+const val WEBRTC_SHARED_STREAM_ID_DEFAULT = false
+const val WEBRTC_SHARED_STREAM_ID = "screen"
+const val WEBRTC_VIDEO_STREAM_ID_LEGACY = "screen-video"
+const val WEBRTC_AUDIO_STREAM_ID_LEGACY = "screen-audio"
+const val WEBRTC_VIDEO_TRACK_ID = "screen0"
+const val WEBRTC_AUDIO_TRACK_ID = "audio0"
+
+enum class WebRtcTrackKind { VIDEO, AUDIO }
+
+fun webRtcStreamIds(kind: WebRtcTrackKind, shared: Boolean = WEBRTC_SHARED_STREAM_ID_DEFAULT): List<String> =
+    if (shared) listOf(WEBRTC_SHARED_STREAM_ID)
+    else listOf(if (kind == WebRtcTrackKind.VIDEO) WEBRTC_VIDEO_STREAM_ID_LEGACY else WEBRTC_AUDIO_STREAM_ID_LEGACY)
+
 // User-selectable capture presets. Width/height/fps are applied to the
 // ScreenCapturerAndroid.startCapture call. Each preset is a sensible combo
 // that most Chromecasts decode fine; exotic resolutions (1440p/4K) are
