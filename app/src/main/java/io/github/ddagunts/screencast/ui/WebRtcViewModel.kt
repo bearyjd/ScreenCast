@@ -12,9 +12,12 @@ import io.github.ddagunts.screencast.cast.CastDiscovery
 import io.github.ddagunts.screencast.cast.DiscoveryStatus
 import io.github.ddagunts.screencast.cast.CHROMECAST_DEFAULT_PORT
 import io.github.ddagunts.screencast.util.ManualHostsStore
+import io.github.ddagunts.screencast.webrtc.MediaMuteGuards
 import io.github.ddagunts.screencast.webrtc.VideoPreset
 import io.github.ddagunts.screencast.webrtc.VideoCodecPreference
 import io.github.ddagunts.screencast.webrtc.WebRtcConfigStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -81,6 +84,22 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _audioEnabled = MutableStateFlow(configStore.audioEnabled)
     val audioEnabled: StateFlow<Boolean> = _audioEnabled
+
+    private val _muteWhileCasting = MutableStateFlow(configStore.muteWhileCasting)
+    val muteWhileCasting: StateFlow<Boolean> = _muteWhileCasting
+
+    fun setMuteWhileCasting(enabled: Boolean) {
+        _muteWhileCasting.value = enabled
+        configStore.muteWhileCasting = enabled
+    }
+
+    init {
+        // A previous cast may have died while muted; put the volume back if nothing is casting.
+        // Off the main thread (SharedPreferences). The live-cast check runs under the guard lock.
+        viewModelScope.launch(Dispatchers.IO) {
+            MediaMuteGuards.get(app).recover { WebRtcForegroundService.liveCast }
+        }
+    }
 
     fun setAppId(value: String) {
         val trimmed = value.trim()

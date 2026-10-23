@@ -53,6 +53,7 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
     val webRtcBitrate by webRtcVm.maxBitrateMbps.collectAsStateWithLifecycle()
     val webRtcCodec by webRtcVm.videoCodecPreference.collectAsStateWithLifecycle()
     val webRtcAudio by webRtcVm.audioEnabled.collectAsStateWithLifecycle()
+    val webRtcMute by webRtcVm.muteWhileCasting.collectAsStateWithLifecycle()
     val webRtcCasting = webRtcSession != null
     // Stream config is shared across every active session, so we can only
     // edit it when *no* casts are live. A change mid-cast would invalidate
@@ -258,6 +259,8 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
             )
             Spacer(Modifier.height(8.dp))
             WebRtcAudioSetting(requested = webRtcAudio, enabled = !webRtcCasting, onChange = { webRtcVm.setAudioEnabled(it) })
+            Spacer(Modifier.height(8.dp))
+            MuteWhileCastingSetting(checked = webRtcMute, enabled = !webRtcCasting, onChange = { webRtcVm.setMuteWhileCasting(it) })
         }
     }
 }

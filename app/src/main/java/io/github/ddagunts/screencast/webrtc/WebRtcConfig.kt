@@ -86,6 +86,9 @@ data class WebRtcSessionConfig(
     // AudioRecord needs RECORD_AUDIO even for playback capture.
     val recordAudioGranted: Boolean = false,
     val sdkInt: Int = Build.VERSION.SDK_INT,
+    // Opt-in, experimental: set the phone's media stream mute flag once the cast is up and clear it
+    // when the cast stops (only if still muted). No volume level is stored or restored.
+    val muteWhileCasting: Boolean = false,
 ) {
     // Audio will be attempted. It can still fall back to video-only at runtime.
     val audioActive: Boolean get() = resolveAudioMode(audioRequested, recordAudioGranted, sdkInt) == AudioMode.ACTIVE
@@ -131,6 +134,10 @@ class WebRtcConfigStore(context: Context) {
         get() = prefs.getBoolean(KEY_AUDIO_PLAYBACK_ENABLED, true)
         set(value) { prefs.edit().putBoolean(KEY_AUDIO_PLAYBACK_ENABLED, value).apply() }
 
+    var muteWhileCasting: Boolean
+        get() = prefs.getBoolean(KEY_MUTE_WHILE_CASTING, false)
+        set(value) = prefs.edit { putBoolean(KEY_MUTE_WHILE_CASTING, value) }
+
     // True once the system RECORD_AUDIO prompt was answered with a denial; lets the UI tell
     // "never asked" from "don't ask again".
     var micPermissionAsked: Boolean
@@ -146,6 +153,7 @@ class WebRtcConfigStore(context: Context) {
         videoCodecPreference = videoCodecPreference,
         recordAudioGranted = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED,
+        muteWhileCasting = muteWhileCasting,
     )
 
     companion object {
@@ -156,6 +164,7 @@ class WebRtcConfigStore(context: Context) {
         private const val KEY_VIDEO_CODEC_PREFERENCE = "video_codec_preference"
         // Legacy "audio_enabled" was always written as false by an older build; ignored on purpose.
         private const val KEY_AUDIO_PLAYBACK_ENABLED = "audio_playback_enabled"
+        private const val KEY_MUTE_WHILE_CASTING = "mute_while_casting"
         private const val KEY_MIC_PERMISSION_ASKED = "mic_permission_asked"
     }
 }

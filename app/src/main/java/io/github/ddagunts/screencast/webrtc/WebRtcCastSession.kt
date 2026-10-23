@@ -3,6 +3,7 @@ package io.github.ddagunts.screencast.webrtc
 
 import android.content.Context
 import android.content.Intent
+import androidx.annotation.VisibleForTesting
 import io.github.ddagunts.screencast.cast.CastChannel
 import io.github.ddagunts.screencast.cast.CastDevice
 import io.github.ddagunts.screencast.cast.CastMessage
@@ -54,7 +55,8 @@ sealed class WebRtcState {
     data class Error(val message: String) : WebRtcState()
 }
 
-class WebRtcCastSession internal constructor(
+@VisibleForTesting
+open class WebRtcCastSession internal constructor(
     private val context: Context,
     val device: CastDevice,
     private val sessionConfig: WebRtcSessionConfig,
@@ -212,7 +214,8 @@ class WebRtcCastSession internal constructor(
     // best-effort BYE/STOP/CLOSE so it clears its <video> instead of freezing.
     fun stop() = finish(null, farewell = true)
 
-    fun close() = finish(null)
+    @VisibleForTesting
+    open fun close() = finish(null)
 
     private fun fail(message: String) = finish(message)
 
