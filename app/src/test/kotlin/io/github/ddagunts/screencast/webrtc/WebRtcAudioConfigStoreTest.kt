@@ -57,3 +57,29 @@ class WebRtcAudioConfigStoreTest {
         assertEquals(false, WebRtcConfigStore(ctx).snapshot().audioActive)
     }
 }
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class MuteWhileCastingStoreTest {
+    private val ctx get() = ApplicationProvider.getApplicationContext<Context>()
+
+    @Test fun `mute while casting is off by default`() {
+        assertFalse(WebRtcConfigStore(ctx).muteWhileCasting)
+        assertFalse(WebRtcConfigStore(ctx).snapshot().muteWhileCasting)
+    }
+
+    @Test fun `mute while casting persists`() {
+        WebRtcConfigStore(ctx).muteWhileCasting = true
+        assertTrue(WebRtcConfigStore(ctx).muteWhileCasting)
+        assertTrue(WebRtcConfigStore(ctx).snapshot().muteWhileCasting)
+    }
+
+    @Test fun `prefs marker store round trips and clears`() {
+        val s = PrefsMuteMarkerStore(ctx)
+        assertEquals(null, s.read())
+        s.write(MuteMarker(7, "abc", 99L))
+        assertEquals(MuteMarker(7, "abc", 99L), PrefsMuteMarkerStore(ctx).read())
+        s.clear()
+        assertEquals(null, PrefsMuteMarkerStore(ctx).read())
+    }
+}

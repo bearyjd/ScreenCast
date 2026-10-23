@@ -17,6 +17,7 @@ import io.github.ddagunts.screencast.cast.CastDevice
 import io.github.ddagunts.screencast.util.logE
 import io.github.ddagunts.screencast.util.logI
 import io.github.ddagunts.screencast.util.logW
+import io.github.ddagunts.screencast.webrtc.MediaMuteGuard
 import io.github.ddagunts.screencast.webrtc.WebRtcCastSession
 import io.github.ddagunts.screencast.webrtc.WebRtcState
 import kotlinx.coroutines.CancellationException
@@ -42,6 +43,8 @@ open class WebRtcForegroundService : Service() {
     private val scope by lazy { CoroutineScope(workerDispatcher + SupervisorJob()) }
     internal open fun createSession(device: CastDevice, config: io.github.ddagunts.screencast.webrtc.WebRtcSessionConfig) =
         WebRtcCastSession(this, device, config)
+    internal open fun createMuteGuard(): MediaMuteGuard = MediaMuteGuard.forContext(this)
+    private val muteGuard by lazy { createMuteGuard() }
     private var session: WebRtcCastSession? = null
     private var sessionJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -51,6 +54,8 @@ open class WebRtcForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        // Service died mid-cast last time: undo the mute (no-op without a marker).
+        muteGuard.recoverIfIdle(castActive = session != null)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -118,6 +123,7 @@ open class WebRtcForegroundService : Service() {
         val cfg = io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).snapshot()
         val s = createSession(device, cfg)
         session = s
+        if (cfg.muteWhileCasting) muteGuard.mute(java.util.UUID.randomUUID().toString())
         sessionJob = scope.launch {
             // Observe state and mirror to the global flow so the UI can see it.
             launch {
@@ -172,6 +178,7 @@ open class WebRtcForegroundService : Service() {
     private fun finishTerminalSession(finished: WebRtcCastSession) {
         if (session !== finished) return
         finished.close()
+        muteGuard.restore()
         session = null
         sessionJob?.cancel()
         sessionJob = null
@@ -183,6 +190,7 @@ open class WebRtcForegroundService : Service() {
         // stop() first: it closes the session synchronously, so cancelling the job
         // afterwards cannot pre-empt the farewell with close().
         runCatching { session?.stop() }.onFailure { logW("stopCast: $it") }
+        muteGuard.restore()
         sessionJob?.cancel()
         sessionJob = null
         session = null
