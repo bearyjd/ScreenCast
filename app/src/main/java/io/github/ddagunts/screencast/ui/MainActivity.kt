@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
             io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).micPermissionAsked = true
         }
         CastDiscovery.shared(this).rescan() // user may have just allowed local network; no-op without a lease
+        maybeExplainMic()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,15 +85,25 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.POST_NOTIFICATIONS
         }
-        val declaredPermissions = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
-            .requestedPermissions.orEmpty()
-        if (Manifest.permission.RECORD_AUDIO in declaredPermissions &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            needed += Manifest.permission.RECORD_AUDIO
-        }
         localNetworkPermissionToRequest()?.let { needed += it }
-        if (needed.isNotEmpty()) permissionRequest.launch(needed.toTypedArray())
+        if (needed.isNotEmpty()) permissionRequest.launch(needed.toTypedArray()) else maybeExplainMic()
+    }
+
+    // RECORD_AUDIO only lets AudioRecord capture playback audio. Explain once, never re-ask on launch.
+    private fun maybeExplainMic() {
+        val prefs = getSharedPreferences("launch_prompts", MODE_PRIVATE)
+        val declared = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
+            .requestedPermissions.orEmpty().contains(Manifest.permission.RECORD_AUDIO)
+        val granted = ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (micLaunchAction(declared, granted, prefs.getBoolean("mic_rationale_shown", false)) != MicLaunchAction.SHOW_RATIONALE) return
+        prefs.edit().putBoolean("mic_rationale_shown", true).apply()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Share audio?")
+            .setMessage("To send your phone's sound to the TV, Android requires the microphone permission. The microphone itself is not recorded; only audio from apps that allow capture is sent. You can skip this and cast without sound.")
+            .setPositiveButton("Continue") { _, _ -> permissionRequest.launch(arrayOf(Manifest.permission.RECORD_AUDIO)) }
+            .setNegativeButton("Not now", null)
+            .show()
     }
 }
 
