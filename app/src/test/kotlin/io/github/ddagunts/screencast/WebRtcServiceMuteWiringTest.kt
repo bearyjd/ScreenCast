@@ -45,7 +45,8 @@ import org.webrtc.PeerConnection.PeerConnectionState
 internal class WireTransport : SessionTransport {
     override val incoming = MutableSharedFlow<CastMessage>(extraBufferCapacity = 8)
     override fun connect(onClose: (Throwable?) -> Unit): Job = Job()
-    override suspend fun send(message: CastMessage) {}
+    val sent = java.util.concurrent.CopyOnWriteArrayList<CastMessage>()
+    override suspend fun send(message: CastMessage) { sent += message }
     override fun close() {}
     suspend fun ready() = incoming.emit(CastMessage("receiver-0", SENDER_ID, CastNs.RECEIVER,
         """{"type":"RECEIVER_STATUS","status":{"applications":[{"transportId":"transport","sessionId":"session"}]}}"""))

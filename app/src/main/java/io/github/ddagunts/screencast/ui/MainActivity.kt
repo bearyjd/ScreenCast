@@ -57,6 +57,9 @@ class MainActivity : ComponentActivity() {
     private val webRtcVm: WebRtcViewModel by viewModels()
     private val atvVm: AndroidTvViewModel by viewModels()
 
+    // False until launch permission prompts finish, so the rationale never stacks on a system dialog.
+    private var micPromptReady by mutableStateOf(false)
+
     private val permissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -65,6 +68,7 @@ class MainActivity : ComponentActivity() {
             io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).micPermissionAsked = true
         }
         CastDiscovery.shared(this).rescan() // user may have just allowed local network; no-op without a lease
+        micPromptReady = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +77,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             ScreenCastTheme {
                 Surface(Modifier.fillMaxSize()) { AppScaffold(vm, webRtcVm, atvVm) }
+                MicRationaleDialog(
+                    ready = micPromptReady,
+                    evaluate = ::micAction,
+                    onMarkShown = {
+                        getSharedPreferences(LAUNCH_PROMPTS_PREFS, MODE_PRIVATE).edit().putBoolean(MIC_RATIONALE_SHOWN_KEY, true).apply()
+                    },
+                    onRequestMic = { permissionRequest.launch(arrayOf(Manifest.permission.RECORD_AUDIO)) },
+                )
             }
         }
     }
@@ -84,15 +96,16 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.POST_NOTIFICATIONS
         }
-        val declaredPermissions = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
-            .requestedPermissions.orEmpty()
-        if (Manifest.permission.RECORD_AUDIO in declaredPermissions &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            needed += Manifest.permission.RECORD_AUDIO
-        }
         localNetworkPermissionToRequest()?.let { needed += it }
-        if (needed.isNotEmpty()) permissionRequest.launch(needed.toTypedArray())
+        if (needed.isNotEmpty()) permissionRequest.launch(needed.toTypedArray()) else micPromptReady = true
+    }
+
+    // RECORD_AUDIO only lets AudioRecord capture playback audio. Explain once (see MicRationaleDialog).
+    private fun micAction(): MicLaunchAction {
+        val prefs = getSharedPreferences(LAUNCH_PROMPTS_PREFS, MODE_PRIVATE)
+        val granted = ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        return micLaunchAction(isRecordAudioDeclared(this), granted, prefs.getBoolean(MIC_RATIONALE_SHOWN_KEY, false), Build.VERSION.SDK_INT)
     }
 }
 
@@ -202,7 +215,10 @@ private fun CastScreenRoot(
             }
         }
         when (castMode) {
-            CastMode.HLS -> CastControlScreen(vm)
+            CastMode.HLS -> {
+                MicPermissionBanner()
+                CastControlScreen(vm)
+            }
             CastMode.WEBRTC -> WebRtcCastBody(webRtcVm)
             CastMode.REMOTE -> AndroidTvRemoteScreen(atvVm)
         }
