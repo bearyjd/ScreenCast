@@ -1,90 +1,98 @@
 # Opt-in microphone mix for WebRTC playback casting
 
-Status: implemented on `feat/mic-mix`; awaiting security review and device checks.
-Product decision: visible toggle ("Mix in microphone"), OFF by default.
+Status: implemented on `feat/mic-mix` (fix round after code, security and critic reviews); awaiting device checks.
+Product decision: visible toggle ("Mix in microphone"), OFF by default, Android 11 (API 30) or newer only.
+Unit tests: 575 pass (523 before this round; mic-mix suites: controller 33, policy 15, invariants 10, store 3, mixer 23, ring 6+3).
 
 ## Design
 
 Playback capture is unchanged: the libwebrtc ADM is built with `AUDIO_SOURCE_REMOTE_SUBMIX` and is
 watched by `PlaybackAudioGuard`, which disables recording if the ADM ever starts any other record.
-
 The microphone is captured by a **separate** `AudioRecord` (`AndroidMicSource`, `AudioSource.MIC`,
-48 kHz mono PCM16) that is outside the ADM and outside the guard. Pieces (all in `webrtc/`):
+48 kHz mono PCM16) outside the ADM. Pieces (all in `webrtc/`):
 
 | File | Role |
 |---|---|
-| `PcmMixer.kt` | Pure mixer. Mono mic upmixed to both channels; each source scaled -3 dB (Q15 23170), summed, saturated to Short. Underrun = silent mic with the same playback gain (no level pumping). Byte-wise LE access: independent of ByteBuffer order; trailing partial frame untouched. |
-| `MicRingBuffer.kt` | Bounded (100 ms) FIFO. Overflow drops the oldest samples (counted); underrun returns fewer samples. Monitor held only for an array copy. |
-| `MicMix.kt` | `MicSource` seam, `MicMixController` (permission re-check, create, start, reader thread, degrade, idempotent stop), `createMicMixController` (the only gate), `MicMixBufferCallback` (mix point). |
-| `AndroidMicSource.kt` | The only file allowed to name a microphone `AudioSource` (enforced by a test). |
-| `WebRtcForegroundType.kt` | Pure `foregroundServiceType(micMix, permissionGranted, sdkInt)`. |
+| `PcmMixer.kt` | Pure mixer + `MicGate` + `FeedbackGuard`. Mic: -9 dB (Q15 11627), then a gate with 5 ms attack / 150 ms hold / 100 ms release ramps (opens at raw sample >= 1500). Playback is attenuated by -3 dB only in proportion to the gate gain, so it is byte-identical while the gate is closed. Sum saturated. Byte-wise LE access; trailing partial frame untouched. Feedback guard: mixed-in mic peak >= 9000 continuously for 3 s -> trips. |
+| `MicRingBuffer.kt` | Bounded (100 ms) FIFO, drop-oldest on overflow, `trimTo(target)`. |
+| `MicMix.kt` | `MicSource` seam, `MicMixController` (permission re-check, create/start outside the lock, reader thread, degrade, `stop`/`stopAsync`, silence detection, latency trimming), `createMicMixController` (the only gate), `wireMicToGuard`, `MicMixBufferCallback` (mix point). |
+| `AndroidMicSource.kt` | The only file that constructs a microphone `AudioRecord`. |
+| `WebRtcForegroundType.kt` | Pure `foregroundServiceType(...)` and `startForegroundWithMicFallback(...)` (the seam the service uses). |
+| `PlaybackAudioPolicy.kt` | Copy, `micMixSwitchVisible`, `micMixToggleAction`, `micMixConsentAction`, `webRtcNotificationBody`. |
 
-Flow: `WebRtcSessionConfig.micMixActive = micMix && audioActive` (audioActive already implies
-RECORD_AUDIO granted, API >= 29, audio requested). `WebRtcPeer.build()` calls
-`createMicMixController(config, ...)`: **null unless micMixActive**, in which case the ADM buffer
-callback is exactly the pre-existing `WebRtcAudioMeter`. The mic is started only after a playback
-audio track exists (`addScreenSource`), and stopped first in `close()`.
-The mix runs inside the ADM `AudioBufferCallback` on the ADM audio thread, only while the controller
-is ACTIVE, the guard is not tripped, and the buffer is 48 kHz / 2 ch / PCM16; otherwise the buffer is
-untouched. Exceptions in the mixer disable mixing, never reach the audio thread.
+Flow: `WebRtcSessionConfig.micMixActive = micMix && audioActive && sdkInt >= 30`. `WebRtcPeer.build()` calls
+`createMicMixController(...)`: **null unless micMixActive**, in which case the ADM buffer callback is exactly the
+pre-existing `WebRtcAudioMeter`. The mic is started when the peer connection first reaches CONNECTED (not at
+`addTrack`, so signaling time and a cast that never connects never record) and stopped first in `close()`.
+Not unit-tested (WebRtcPeer needs libwebrtc); `start()` is idempotent and a stopped controller refuses to start (both tested).
 
-Drift: mic and ADM clocks are independent and there is no resampler. Mic fast -> ring overflow drops
-oldest samples (rare click; latency capped at 100 ms). Mic slow -> underrun -> silent mic for that buffer.
-Added latency on the mic path is bounded by the ring (<= 100 ms); the playback path adds none.
+The mix runs inside the ADM `AudioBufferCallback` on the audio thread only while the controller is ACTIVE, the guard
+is not tripped, and the buffer is 48 kHz / 2 ch / PCM16, at buffer base offset 0 (not `position()`).
+Anything that makes mixing permanently invalid ends the mic via `stopAsync()` (a short-lived thread; the audio thread
+never waits on `AudioRecord`): guard tripped, odd format (logged once), mixer exception (logged once), feedback guard.
+`PlaybackAudioGuard` also has an `onTrip` hook (not called on orderly shutdown) wired through
+`PlaybackAudioController.onGuardTrip` to `MicMixController.stopAsync()`, so an ADM failure ends the reader thread,
+releases the record and removes the indicator.
 
-Degrade (never touches the ADM or guard; cast continues with playback only, logged to the log panel):
-permission denied (incl. GrapheneOS per-app mic toggle) -> `DENIED`; factory throws / record not
-INITIALIZED / `startRecording` fails / read error / 100 empty reads -> `FAILED`, record released.
+Echo / feedback: the TV speaker re-enters the phone mic 200-400 ms later. Mitigations: -9 dB mic gain, noise gate
+(quiet TV sound is closed out, not mixed), feedback guard (sustained loud mic -> mic mix stopped for the rest of the cast, logged),
+and honest copy (no AEC; mute the TV or keep the phone away; phone headphones do not prevent TV-to-mic echo).
 
-Foreground service: `foregroundServiceType="mediaProjection|microphone"` in the manifest, plus
-`FOREGROUND_SERVICE_MICROPHONE`. At runtime the MICROPHONE type is passed to `startForeground` only when
-micMixActive and RECORD_AUDIO is granted and API >= 30; otherwise the type is exactly today's
-MEDIA_PROJECTION. If the system rejects the mic type (`SecurityException`/`ForegroundServiceStartNotAllowedException`),
-the service restarts foreground with today's type and **turns the mic mix off for that session** (fail closed).
+Latency: the consumer trims the ring to ~30 ms (drop oldest) on its first read and whenever it exceeds ~60 ms; the
+100 ms ring is a hard cap only. Drift: mic fast -> trims/clicks, mic slow -> silent mic for that buffer.
 
-UI: second switch under the audio switch, shown only when playback audio is on, disabled while casting.
-Turning it on without RECORD_AUDIO shows an explanatory dialog first, then the system prompt; a denial leaves
-the switch off. The line "The microphone is not used" is shown only while the mix is off
-(`audioSettingDescription`), and the permission note has a variant for the on state.
+Degrade (never touches the ADM or guard; cast continues with playback only, logged): permission denied (incl. GrapheneOS
+per-app toggle) -> `DENIED`; factory throws / record not initialized / start fails / read error or exception (logged with
+the exception) / 100 empty reads / reader thread cannot be created -> `FAILED`, record released once.
+Silence: 200 consecutive all-zero 10 ms reads (~2 s) -> `statusText` "mic silent (blocked by system?)", logged once,
+playback audio unaffected, never reported as active; cleared when audio returns. Surfaced in the log panel only.
+
+Foreground service: manifest `mediaProjection|microphone` + `FOREGROUND_SERVICE_MICROPHONE`. The MICROPHONE type is requested only
+when micMixActive and RECORD_AUDIO granted and API >= 30 (API 29 has no such type; the switch is hidden below API 30).
+`startForegroundWithMicFallback` (tested): a refused mic type (any RuntimeException) -> retry with today's type and the
+mic mix is switched **off for that session** (fail closed). Default (off): one call with today's type, same as main.
+
+## UI / disclosure
+
+- Switch shown only when playback audio is on and API >= 30; disabled while casting.
+- **Every** off->on toggle shows the consent dialog (also when RECORD_AUDIO is already granted); the permission request follows only if it is missing; a denial leaves the switch off.
+- Notification body says "Microphone is mixed in" while the cast has the mix on (derived from the accepted mic FGS type, so it can stay shown if the mic later degrades: over-disclosure by design).
+- Copy states: indicator on Android 12+, echo expected when the TV speaker is audible near the phone, headphones on the phone do not prevent it, the switch is locked during a cast so turn it off before the next cast. No mid-cast "Mic off" action (the simplest truthful option was chosen).
+- Turning playback audio off clears the stored mic mix (store-level, plus the ViewModel state) so turning audio back on never re-enables the mic.
 
 ## Privacy invariants
 
-Preserved: with the toggle off (default, also after upgrade: pref absent = false) no mic `AudioRecord` is
-created, the foreground type is unchanged, the ADM is pinned to REMOTE_SUBMIX, the guard is unmodified.
-The ADM never records the microphone, in either state.
-Changed: with the toggle on, the app records the microphone via a separate record and transmits it to the
-receiver. Android's mic indicator will show. The mic also picks up room/TV sound (echo risk; no AEC is applied).
-Mic audio is never logged or stored; only status lines are logged (no sample data).
+Preserved with the toggle off (default, also after upgrade: pref absent = false): no mic `AudioRecord`, same FGS type, ADM pinned to REMOTE_SUBMIX, guard
+modified only by an optional no-op `onTrip`, same ADM buffer callback (`WebRtcAudioMeter`). The ADM never records the microphone.
+Changed with the toggle on: a separate recorder captures the mic and it is transmitted to the receiver. Mic audio is never logged or stored.
 
-## Threat notes: what a hostile reviewer should check
+## Static invariants (`MicMixSourceInvariantTest`)
 
-1. Gate: grep for `AndroidMicSource` / `AudioSource.MIC`: only `createMicMixController` -> `MicMixController.start` reaches it.
-   `MicMixSourceInvariantTest` fails if another file names a mic AudioSource.
-2. `micMixActive` requires `audioActive`; snapshot reads RECORD_AUDIO at cast start and the controller re-checks at start.
-3. The guard is untouched; confirm `PlaybackAudioGuardTest` / `PlaybackAudioControllerTest` unchanged and green.
-4. Mic stops on every exit path: `close()` (first step), reader error, controller `stop()`. Verify service stop/terminal paths all reach `WebRtcPeer.close()`.
-5. Mix point mutates the buffer in place: confirm it cannot run before the guard check and only handles 48k/2ch/PCM16.
-6. Manifest: only `WebRtcForegroundService` carries the microphone type (tested). Check no new exported component.
-7. Copy truthfulness in both states (tested for the audio description and permission note).
-8. Pref `mic_mix` lives in the app-private `webrtc_config` prefs; not backed up differently from other prefs (check `allowBackup`/data extraction rules).
+Scans all of `src/main` (kt + java, comments stripped, working-directory independent): `AudioRecord(`, `AudioRecord.Builder`, `MediaRecorder`,
+`setAudioSource(` only in the allow list (`AndroidMicSource.kt`, `WebRtcPlaybackSwap.kt`, and `AudioEncoder.kt` for the pre-existing HLS
+playback-capture recorder, additionally asserted to use `setAudioPlaybackCaptureConfig` and no audio source); `setAudioSource(` elsewhere
+must be the pinned REMOTE_SUBMIX; microphone `AudioSource.*` names only in `AndroidMicSource.kt`; `AndroidMicSource` referenced only from
+`WebRtcPeer.kt`/`MicMix.kt`; manifest mic type only on `WebRtcForegroundService`.
+Mutation checks run (each made the named test fail, then removed): scratch `AudioRecord(1,`, `AudioRecord.Builder()`, `MediaRecorder()`, `setAudioSource(1)`; plus removing the guard `onTrip` call, the callback's disabled->stop,
+the playback-attenuation gating, and the ring high-water trim (each failed 1-4 tests).
 
 ## Device checks required (not verifiable in unit tests)
 
-- Mic indicator appears only when the toggle is on and a cast is running, and disappears at stop (and on app kill).
-- Toggle off (default): no indicator; behavior identical to main.
-- GrapheneOS per-app mic toggle off / permission denied: cast continues, log shows degrade, no crash, no ADM guard trip.
-- Headphones vs TV speaker echo; voice level vs media level balance (-3 dB each).
-- FGS: assumption is that the service is started while the app is in the foreground (user taps Cast, MediaProjection consent activity),
-  which satisfies the "while-in-use" requirement for the MICROPHONE type on Android 14+; a start from the quick-settings tile
-  or any background path may be refused and then runs with the mic mix off. Verify on API 30, 34, 35/36. On API 29 the MICROPHONE type does not exist, so `startForegroundNow` gets no mic type and
-  the session runs with the mic mix **off** (unit-tested via the pure function; confirm the log line on a device if available).
-- Latency/AV sync with mix on vs off; CPU impact of the extra record thread.
-- Mic revoked mid-cast: record read error -> degrade.
+- Echo/howl: cast with the TV at normal volume and the phone nearby, mix on: does the gate + feedback guard prevent audible howl; tune thresholds if not.
+- Mic indicator appears only while the mix is on and connected, and disappears on stop, on guard trip and on app kill. Android 11 shows none (copy says 12+).
+- Toggle off (default): no indicator, behavior identical to main.
+- GrapheneOS per-app mic permission denied: cast continues, log shows degrade, no crash, no ADM guard trip. Note: a runtime permission revoke kills the app process (it is not an in-app error); the OS sensor-privacy mic toggle instead yields silence, not errors: verify the "mic silent (blocked by system?)" log line after ~2 s and that playback is unaffected.
+- Android 11-13: a mic `AudioRecord` started without while-in-use access can deliver silence rather than fail; verify silence detection covers it.
+- FGS start rules on API 34+ / Android 17: the service starts after the projection consent activity finishes; confirm the mic type is accepted (else the log shows the fallback and the mix is off). Also try a start that is not from the foreground (tile).
+- Mic start at CONNECTED: no missing first words; latency/AV sync with mix on vs off; CPU of the extra thread.
+- Notification shows "Microphone is mixed in" only with the mix on.
 
 ## Residual risks
 
-- No echo cancellation; room/TV audio is re-captured.
-- Mic and ADM clock drift produces occasional clicks (drop-oldest) or short gaps.
-- On API 29 the mix is silently unavailable (no mic FGS type); the switch still shows on.
-- Mixing mutates the ADM-owned buffer in place; correctness depends on libwebrtc's callback contract (buffer valid for `bytesRead`).
-- RECORD_AUDIO is a single permission shared with playback capture; revoking it disables both.
+- No echo cancellation; gate, -9 dB and the feedback guard reduce but do not remove echo. Thresholds are untuned guesses until device-tested.
+- The feedback guard is level-based: sustained loud speech could in theory trip it (then the mic stays off until the next cast).
+- Mic/ADM clock drift: occasional clicks (drop-oldest) or short gaps.
+- Mixing mutates the ADM-owned buffer in place; depends on libwebrtc's callback contract (valid from index 0 for `bytesRead`).
+- Silence detection only logs; the user sees no on-screen status. The notification can claim the mic is mixed in after a later degrade.
+- `WebRtcPeer` wiring (start at CONNECTED, guard hook, callback choice) is exercised only through its parts, not end to end.
+- RECORD_AUDIO is shared with playback capture; revoking it disables both (and kills the process).
