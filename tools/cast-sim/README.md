@@ -76,6 +76,20 @@ bounded by the reported clock-offset uncertainty (min-RTT/2). "to display" uses
 the rVFC callback time. Also reported: fps, decode-failure %, jitter-buffer and
 decode averages, drops, freezes, codec/resolution, ICE RTT, audio jitter/concealment.
 
+## A/B: shared stream id (A/V sync, attended)
+
+The report has no single `audio_vs_video` field; compute it as
+`audio jitterBuffer ms - video jitterBuffer ms` from the two lines of the printed
+report (or `webrtc.audio.jitterBufferDelayAvgMs` minus the video equivalent in `out/*.json`).
+Earlier measurement: ~84 ms audio vs ~9 ms video (~75 ms delta).
+
+1. Build A (old): as-is, `WEBRTC_SHARED_STREAM_ID_DEFAULT = false` in `WebRtcConfig.kt`. Cast 60 s of
+   playing video+audio to the sim, record the report.
+2. Build B (new): set that constant to `true`, rebuild, same content, same duration, same sim host.
+3. Compare the delta and the audio concealment %. Repeat 3x each; interleave A/B.
+The sim measures receiver-side jitter buffers only, not perceived lip-sync, TV/HDMI delay, or
+audio choppiness by ear. Treat the result as evidence, not proof. See `av-sync-TDD.md`.
+
 ## Tests
 
 ```sh

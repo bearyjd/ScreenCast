@@ -87,9 +87,9 @@ function createPeer(session) {
 
   // Both remote tracks (video, audio) land in a single MediaStream wired to
   // the fullscreen <video> element. Two reasons not to split them:
-  //   1. The sender uses distinct stream IDs (screen-video / screen-audio),
-  //      so each ontrack fires with its own evt.streams[0]. We have to
-  //      compose them on this side either way.
+  //   1. The sender's stream IDs may be distinct (screen-video / screen-audio)
+  //      or shared; this code never reads evt.streams, so both work. We
+  //      compose the tracks on this side either way.
   //   2. Routing audio via Web Audio's createMediaStreamSource() is a
   //      long-standing Chrome bug for WebRTC remote tracks — the source
   //      node attaches but produces no output. HTMLMediaElement is the

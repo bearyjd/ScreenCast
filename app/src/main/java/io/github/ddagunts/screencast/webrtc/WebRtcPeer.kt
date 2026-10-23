@@ -211,17 +211,15 @@ internal class WebRtcPeer(
         val preset = config.videoPreset
         cap.startCapture(preset.width, preset.height, preset.fps)
 
-        val track = f.createVideoTrack("screen0", source)
+        val track = f.createVideoTrack(WEBRTC_VIDEO_TRACK_ID, source)
         videoTrack = track
         // addTrack with an empty streamIds list emits an a=msid:- line; the
         // receiver page treats the incoming transceiver as its primary video
         // stream, so the streamId string itself is cosmetic.
-        // Separate stream IDs for video and audio so the receiver can give each
-        // its own MediaStream. When both share one stream, the receiver's
-        // MediaStream dispatches tracks in arrival order and the audio element
-        // can end up sharing a processing queue with large video frames — a
-        // contributor to choppy audio on the TV.
-        val sender = pc.addTrack(track, listOf("screen-video"))
+        // Stream ids come from webRtcStreamIds(): separate by default (audio can
+        // choppily share a queue with large video frames), or one shared id so
+        // libwebrtc lip-syncs the two tracks. See WebRtcConfig.kt.
+        val sender = pc.addTrack(track, webRtcStreamIds(WebRtcTrackKind.VIDEO))
         configureVideoSender(sender)
         applyCodecPreference(pc, f, sender)
 
@@ -246,9 +244,9 @@ internal class WebRtcPeer(
             }
             val aSource = f.createAudioSource(audioConstraints)
             audioSource = aSource
-            val aTrack = f.createAudioTrack("audio0", aSource)
+            val aTrack = f.createAudioTrack(WEBRTC_AUDIO_TRACK_ID, aSource)
             audioTrack = aTrack
-            pc.addTrack(aTrack, listOf("screen-audio"))
+            pc.addTrack(aTrack, webRtcStreamIds(WebRtcTrackKind.AUDIO))
         }
     }
 
