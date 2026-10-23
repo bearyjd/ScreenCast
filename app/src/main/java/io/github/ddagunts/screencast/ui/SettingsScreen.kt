@@ -53,6 +53,7 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
     val webRtcBitrate by webRtcVm.maxBitrateMbps.collectAsStateWithLifecycle()
     val webRtcCodec by webRtcVm.videoCodecPreference.collectAsStateWithLifecycle()
     val webRtcAudio by webRtcVm.audioEnabled.collectAsStateWithLifecycle()
+    val webRtcMicMix by webRtcVm.micMix.collectAsStateWithLifecycle()
     val webRtcMute by webRtcVm.muteWhileCasting.collectAsStateWithLifecycle()
     val webRtcCasting = webRtcSession != null
     // Stream config is shared across every active session, so we can only
@@ -258,7 +259,10 @@ fun SettingsScreen(vm: CastViewModel, webRtcVm: WebRtcViewModel) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            WebRtcAudioSetting(requested = webRtcAudio, enabled = !webRtcCasting, onChange = { webRtcVm.setAudioEnabled(it) })
+            WebRtcAudioSetting(
+                requested = webRtcAudio, enabled = !webRtcCasting, onChange = { webRtcVm.setAudioEnabled(it) },
+                micMix = webRtcMicMix, onMicMixChange = { webRtcVm.setMicMix(it) },
+            )
             Spacer(Modifier.height(8.dp))
             MuteWhileCastingSetting(checked = webRtcMute, enabled = !webRtcCasting, onChange = { webRtcVm.setMuteWhileCasting(it) })
         }

@@ -34,10 +34,12 @@ fun resolveAudioMode(requested: Boolean, recordAudioGranted: Boolean, sdkInt: In
 
 const val AUDIO_PERMISSION_NOTE =
     "Audio will not be sent until you allow the Microphone permission. Playback capture needs it; the microphone is not used."
+const val AUDIO_PERMISSION_NOTE_MIC_MIX =
+    "Audio will not be sent until you allow the Microphone permission. Playback capture and the microphone mix both need it."
 const val AUDIO_UNSUPPORTED_NOTE = "Audio needs Android 10 or newer; this cast will be video-only."
 
-fun audioNote(mode: AudioMode): String? = when (mode) {
-    AudioMode.NEEDS_PERMISSION -> AUDIO_PERMISSION_NOTE
+fun audioNote(mode: AudioMode, micMix: Boolean = false): String? = when (mode) {
+    AudioMode.NEEDS_PERMISSION -> if (micMix) AUDIO_PERMISSION_NOTE_MIC_MIX else AUDIO_PERMISSION_NOTE
     AudioMode.UNSUPPORTED_OS -> AUDIO_UNSUPPORTED_NOTE
     else -> null
 }
@@ -75,3 +77,22 @@ internal class ReleaseOnce(private val action: () -> Unit) {
     private val done = java.util.concurrent.atomic.AtomicBoolean(false)
     fun run() { if (done.compareAndSet(false, true)) action() }
 }
+
+// Shown under the playback-audio switch. Must stay true for both states of the mic mix switch.
+private const val AUDIO_DESCRIPTION_BASE =
+    "Sound from any app that allows audio capture is sent, even if you share only one app."
+fun audioSettingDescription(micMix: Boolean): String =
+    if (micMix) "$AUDIO_DESCRIPTION_BASE Your microphone is also mixed in (see below)."
+    else "$AUDIO_DESCRIPTION_BASE The microphone is not used."
+
+const val MIC_MIX_LABEL = "Mix in microphone"
+const val MIC_MIX_EXPLANATION =
+    "Off by default. When on, your voice is added to the cast audio. This uses the microphone: Android shows " +
+        "the microphone indicator while casting. It also picks up room and TV sound, so use headphones or mute " +
+        "the TV to avoid echo. If the microphone is unavailable or blocked, the cast continues with playback " +
+        "audio only."
+const val MIC_MIX_DIALOG_TITLE = "Allow the microphone for the cast?"
+const val MIC_MIX_DIALOG_BODY =
+    "Mixing in the microphone records your voice while you cast and sends it to the TV with the phone's " +
+        "audio. Android will show the microphone indicator. You can turn this off again at any time. " +
+        "Android will now ask for the Microphone permission."

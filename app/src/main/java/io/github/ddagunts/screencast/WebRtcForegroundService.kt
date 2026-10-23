@@ -115,17 +115,20 @@ open class WebRtcForegroundService : Service() {
             return
         }
 
-        startForegroundNow(name)
+        // Snapshot the user's tunable prefs here — the session holds the
+        // values for its lifetime. Changing prefs mid-cast has no effect
+        // (UI disables the controls while casting); the next startCast
+        // picks up any changes.
+        val snap = io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).snapshot()
+        // Fail closed: if the system refuses the microphone FGS type, the mic mix is switched off.
+        val micFgs = startForegroundNow(name, snap)
+        val cfg = if (snap.micMix && !micFgs) snap.copy(micMix = false) else snap
+        if (snap.micMixActive && !micFgs) logW("webrtc: microphone mix unavailable (no microphone foreground type); playback audio only")
         acquireWakeLock()
 
         val device = CastDevice(name, host, port)
         _session.value = SessionSnapshot(device = device, status = "CONNECTING")
 
-        // Snapshot the user's tunable prefs here — the session holds the
-        // values for its lifetime. Changing prefs mid-cast has no effect
-        // (UI disables the controls while casting); the next startCast
-        // picks up any changes.
-        val cfg = io.github.ddagunts.screencast.webrtc.WebRtcConfigStore(this).snapshot()
         val s = createSession(device, cfg)
         session = s
         liveCast = true
@@ -229,9 +232,24 @@ open class WebRtcForegroundService : Service() {
         }
     }
 
-    private fun startForegroundNow(deviceName: String) {
-        val type = if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(deviceName), type)
+    // Returns true when the foreground type includes MICROPHONE (so the mic mix may run). The mic type
+    // is requested only for an active opt-in; if the system rejects it (e.g. not allowed from this
+    // state) we fall back to today's type and the caller turns the mic mix off.
+    private fun startForegroundNow(deviceName: String, cfg: io.github.ddagunts.screencast.webrtc.WebRtcSessionConfig): Boolean {
+        val micType = io.github.ddagunts.screencast.webrtc.foregroundServiceType(
+            cfg.micMixActive, cfg.recordAudioGranted, Build.VERSION.SDK_INT,
+        )
+        val base = io.github.ddagunts.screencast.webrtc.foregroundServiceType(false, false, Build.VERSION.SDK_INT)
+        if (micType != base) {
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(deviceName), micType)
+                return true
+            } catch (e: RuntimeException) { // SecurityException / ForegroundServiceStartNotAllowedException
+                logW("webrtc: microphone foreground type refused ($e); mic mix off, playback audio only")
+            }
+        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(deviceName), base)
+        return false
     }
 
     private fun refreshNotification() {
