@@ -110,4 +110,21 @@ class MuteWhileCastingStoreTest {
         s.clear()
         assertEquals(listOf("commit", "commit"), calls)
     }
+
+    @Test fun `turning playback audio off clears the stored mic mix so it never silently comes back`() {
+        val store = WebRtcConfigStore(ctx)
+        store.micMix = true
+        store.audioEnabled = false
+        assertFalse(WebRtcConfigStore(ctx).micMix)
+        store.audioEnabled = true
+        assertFalse(WebRtcConfigStore(ctx).micMix)
+        assertFalse(WebRtcConfigStore(ctx).snapshot().micMixActive)
+    }
+
+    @Test fun `turning audio on leaves an explicitly chosen mic mix alone`() {
+        val store = WebRtcConfigStore(ctx)
+        store.audioEnabled = true; store.micMix = true
+        store.audioEnabled = true
+        assertTrue(WebRtcConfigStore(ctx).micMix)
+    }
 }

@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,6 +67,8 @@ internal class WebRtcPeer(
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var audioModule: JavaAudioDeviceModule? = null
     private var audioController: PlaybackAudioController? = null
+    // Null unless the user opted into the mic mix AND playback audio is active (createMicMixController).
+    private var micMix: MicMixController? = null
     private var audioPort: RealAdmPort? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
@@ -79,6 +82,8 @@ internal class WebRtcPeer(
 
     private val _codecMismatch = MutableStateFlow<String?>(null)
     override val codecMismatch: StateFlow<String?> = _codecMismatch
+    private val _micMixDisplay = MutableStateFlow(MicMixDisplay.OFF)
+    override val micMixDisplay: StateFlow<MicMixDisplay> = _micMixDisplay
     private val mismatchReporter = CodecMismatchReporter(
         requested = config.videoCodecPreference,
         warn = { logW(it) },
@@ -142,10 +147,29 @@ internal class WebRtcPeer(
             .setAudioRecordStateCallback(controller.stateCallback)
             .setAudioRecordErrorCallback(controller.errorCallback)
         if (config.audioActive) {
-            builder.setAudioBufferCallback(WebRtcAudioMeter(
+            val meter = WebRtcAudioMeter(
                 recordingState = { controller.record?.let { if (it.isRecording) 3 else 1 } ?: -1 },
                 enabled = controller::meterEnabled,
-            ))
+            )
+            // Default (micMix off): exactly the meter, unchanged. The mic reader is NOT part of the ADM.
+            val mixer = createMicMixController(
+                config,
+                micPermissionGranted = {
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        context.applicationContext, android.Manifest.permission.RECORD_AUDIO,
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                },
+                factory = { rate -> AndroidMicSource.create(rate) },
+                log = { logW(it) },
+                onDisplay = { _micMixDisplay.value = it },
+            )
+            micMix = mixer
+            if (mixer != null) _micMixDisplay.value = MicMixDisplay.STARTING
+            if (mixer != null) wireMicToGuard(controller, mixer) // guard trip -> mic stopped (off the audio thread)
+            builder.setAudioBufferCallback(
+                if (mixer == null) meter
+                else MicMixBufferCallback(meter, mixer, enabled = controller::meterEnabled, log = { logW(it) }),
+            )
         }
         run {
             val adm = builder.createAudioDeviceModule()
@@ -244,6 +268,9 @@ internal class WebRtcPeer(
             val aTrack = f.createAudioTrack(WEBRTC_AUDIO_TRACK_ID, aSource)
             audioTrack = aTrack
             pc.addTrack(aTrack, webRtcStreamIds(WebRtcTrackKind.AUDIO))
+            // The opt-in mic reader starts when the connection reaches CONNECTED (see startMicOnConnect),
+            // not here, so signaling time and a never-connected cast never record the microphone.
+            startMicOnConnect()
         }
     }
 
@@ -307,6 +334,16 @@ internal class WebRtcPeer(
     private class CapabilityCodec(val capability: RtpCapabilities.CodecCapability) : CodecLike {
         override val mimeType: String get() = capability.mimeType
         override val parameters: Map<String, String> get() = capability.parameters
+    }
+
+    // Failure/denial degrades to playback-only inside the controller; start() never throws and is
+    // idempotent (a reconnect re-enters CONNECTED harmlessly; a stopped controller refuses to start).
+    private fun startMicOnConnect() {
+        val mic = micMix ?: return
+        samplerScope.launch {
+            _connectionState.first { it == PeerConnection.PeerConnectionState.CONNECTED }
+            mic.start()
+        }
     }
 
     // Runs while CONNECTED; collectLatest cancels the loop on any other state.
@@ -381,6 +418,9 @@ internal class WebRtcPeer(
         if (!statsGuard.closeAndAwait(STATS_CLOSE_WAIT_MS)) {
             logW("close: in-flight stats call did not finish in ${STATS_CLOSE_WAIT_MS} ms; disposing anyway")
         }
+        // Stop the mic first so the record (and the system mic indicator) ends promptly.
+        runCatching { micMix?.stop() }.onFailure { logW("close: mic stop: $it") }
+        micMix = null
         // Disable ADM recording and wait (bounded) for the capture record to
         // stop before the projection goes away; otherwise it logs read errors.
         runCatching { audioController?.close(if (onMainThread()) 60 else 300) }
@@ -410,6 +450,9 @@ internal class WebRtcPeer(
         }
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
             logI("ice state: $state")
+            // The mic must not outlive a dead link. A transient DISCONNECTED that recovers does not
+            // restart it: a stopped controller never restarts (privacy over convenience).
+            if (shouldStopMicOnIce(state)) micMix?.stopAsync()
         }
         override fun onIceConnectionReceivingChange(receiving: Boolean) {}
         override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {

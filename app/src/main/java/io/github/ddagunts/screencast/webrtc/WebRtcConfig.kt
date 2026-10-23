@@ -79,8 +79,8 @@ enum class VideoCodecPreference(val label: String, val mimeType: String?) {
 data class WebRtcSessionConfig(
     val videoPreset: VideoPreset,
     val maxBitrateBps: Int,
-    // What the user asked for (pref). Playback-capture audio only; the
-    // microphone is never used.
+    // What the user asked for (pref). Playback-capture audio; the microphone is used only
+    // when [micMix] is also on (see micMixActive).
     val audioRequested: Boolean,
     val videoCodecPreference: VideoCodecPreference = VideoCodecPreference.H264,
     // AudioRecord needs RECORD_AUDIO even for playback capture.
@@ -89,7 +89,12 @@ data class WebRtcSessionConfig(
     // Opt-in, experimental: set the phone's media stream mute flag once the cast is up and clear it
     // when the cast stops (only if still muted). No volume level is stored or restored.
     val muteWhileCasting: Boolean = false,
+    // Opt-in: mix a SEPARATE microphone AudioRecord into the playback audio. Effective only via [micMixActive].
+    val micMix: Boolean = false,
 ) {
+    // The microphone is touched only when this is true: the user opted in AND playback audio is active
+    // (which implies RECORD_AUDIO is granted and the OS supports playback capture).
+    val micMixActive: Boolean get() = micMix && audioActive && sdkInt >= MIN_MIC_MIX_SDK
     // Audio will be attempted. It can still fall back to video-only at runtime.
     val audioActive: Boolean get() = resolveAudioMode(audioRequested, recordAudioGranted, sdkInt) == AudioMode.ACTIVE
 }
@@ -130,13 +135,23 @@ class WebRtcConfigStore(context: Context) {
         get() = VideoCodecPreference.fromName(prefs.getString(KEY_VIDEO_CODEC_PREFERENCE, null))
         set(value) { prefs.edit().putString(KEY_VIDEO_CODEC_PREFERENCE, value.name).apply() }
 
+    // Turning playback audio off also clears the mic mix, so turning audio back on later can never
+    // silently re-enable the microphone.
     var audioEnabled: Boolean
         get() = prefs.getBoolean(KEY_AUDIO_PLAYBACK_ENABLED, true)
-        set(value) { prefs.edit().putBoolean(KEY_AUDIO_PLAYBACK_ENABLED, value).apply() }
+        set(value) = prefs.edit {
+            putBoolean(KEY_AUDIO_PLAYBACK_ENABLED, value)
+            if (!value) putBoolean(KEY_MIC_MIX, false)
+        }
 
     var muteWhileCasting: Boolean
         get() = prefs.getBoolean(KEY_MUTE_WHILE_CASTING, false)
         set(value) = prefs.edit { putBoolean(KEY_MUTE_WHILE_CASTING, value) }
+
+    // Opt-in (default OFF): also mix the microphone into the cast audio. See docs/mic-mix-TDD.md.
+    var micMix: Boolean
+        get() = prefs.getBoolean(KEY_MIC_MIX, false)
+        set(value) = prefs.edit { putBoolean(KEY_MIC_MIX, value) }
 
     // True once the system RECORD_AUDIO prompt was answered with a denial; lets the UI tell
     // "never asked" from "don't ask again".
@@ -154,6 +169,7 @@ class WebRtcConfigStore(context: Context) {
         recordAudioGranted = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED,
         muteWhileCasting = muteWhileCasting,
+        micMix = micMix,
     )
 
     companion object {
@@ -165,6 +181,7 @@ class WebRtcConfigStore(context: Context) {
         // Legacy "audio_enabled" was always written as false by an older build; ignored on purpose.
         private const val KEY_AUDIO_PLAYBACK_ENABLED = "audio_playback_enabled"
         private const val KEY_MUTE_WHILE_CASTING = "mute_while_casting"
+        private const val KEY_MIC_MIX = "mic_mix"
         private const val KEY_MIC_PERMISSION_ASKED = "mic_permission_asked"
     }
 }

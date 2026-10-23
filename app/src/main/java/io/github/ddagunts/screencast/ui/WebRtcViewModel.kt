@@ -85,6 +85,14 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
     private val _audioEnabled = MutableStateFlow(configStore.audioEnabled)
     val audioEnabled: StateFlow<Boolean> = _audioEnabled
 
+    private val _micMix = MutableStateFlow(configStore.micMix)
+    val micMix: StateFlow<Boolean> = _micMix
+
+    fun setMicMix(enabled: Boolean) {
+        _micMix.value = enabled
+        configStore.micMix = enabled
+    }
+
     private val _muteWhileCasting = MutableStateFlow(configStore.muteWhileCasting)
     val muteWhileCasting: StateFlow<Boolean> = _muteWhileCasting
 
@@ -124,7 +132,8 @@ class WebRtcViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAudioEnabled(enabled: Boolean) {
         _audioEnabled.value = enabled
-        configStore.audioEnabled = enabled
+        configStore.audioEnabled = enabled // also clears the stored mic mix when audio is turned off
+        if (!enabled) _micMix.value = false
     }
 
     fun startCast(device: CastDevice) {

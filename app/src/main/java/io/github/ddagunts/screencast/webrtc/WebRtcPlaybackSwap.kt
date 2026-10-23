@@ -143,6 +143,8 @@ internal class PlaybackAudioGuard(
     private val isOurRecordActive: () -> Boolean,
     private val log: (String) -> Unit,
     private val disableBlocking: () -> Unit = disable,
+    // Called once after a trip (not after an orderly shutdown). May run on the audio thread: keep it cheap.
+    private val onTrip: () -> Unit = {},
 ) {
     private val done = AtomicBoolean(false)
     val isTripped: Boolean get() = done.get()
@@ -160,6 +162,7 @@ internal class PlaybackAudioGuard(
         if (!done.compareAndSet(false, true)) return
         log("webrtc audio: $reason — guard disabled ADM recording; continuing video-only")
         runCatching { disable() }
+        runCatching { onTrip() }
     }
 }
 

@@ -18,11 +18,15 @@ internal class PlaybackAudioController(
     @Volatile var record: PlaybackRecord? = null
         private set
 
+    /** Set once by WebRtcPeer (see wireMicToGuard): runs after the guard trips. */
+    @Volatile var onGuardTrip: () -> Unit = {}
+
     val guard = PlaybackAudioGuard(
         disable = { port?.disableRecording() ?: fallbackDisable() },
         isOurRecordActive = { record?.let { r -> port?.isInstalled(r) } == true },
         log = log,
         disableBlocking = { port?.disableRecordingNow() ?: fallbackDisable() },
+        onTrip = { onGuardTrip() },
     )
 
     val stateCallback = object : JavaAudioDeviceModule.AudioRecordStateCallback {
